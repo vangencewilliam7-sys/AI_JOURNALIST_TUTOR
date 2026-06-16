@@ -8,11 +8,11 @@ const ReportPage: React.FC = () => {
 
   useEffect(() => {
     setKnowledgeReport({
-      report_id: 'REP-SRINI-DAY1',
-      report_title: "Oracle CPQ & Enterprise CRM Architecture — Tacit Knowledge Extraction",
-      expert_name: 'Sreeni Rayaprolu',
-      expert_title: 'PWC Director',
-      expert_domain: "Oracle CPQ / CRM Architecture",
+      report_id: 'REP-DEMO-DAY1',
+      report_title: "Enterprise Architecture — Tacit Knowledge Extraction",
+      expert_name: 'Demo Expert',
+      expert_title: 'Industry Leader',
+      expert_domain: "Enterprise Architecture",
       knowledge_stream: 'General Expertise',
       interview_depth_score: 9.5,
       total_insights_extracted: 12,
@@ -21,17 +21,17 @@ const ReportPage: React.FC = () => {
         {
           block_title: "Personal Narrative Log",
           icon: "user",
-          content: "Sreeni's path from an irregular non-IT background to becoming a PWC Director is a story of relentless pivoting. He started with a BSc degree, spent years navigating heavy career struggles in a completely non-IT landscape, and fought his way into the consulting world through Deloitte. From there he progressed through Argano before landing at PWC, where he now manages massive enterprise-scale sales system designs for clients including Tesla, Cisco, and Bank of America. His trajectory reveals a critical tacit pattern: deep technical mastery doesn't always come from formal CS education — it can be forged through operational pressure and hands-on migration work in legacy systems."
+          content: "The expert's path into their current role reveals a non-traditional progression, highlighting that deep technical mastery can be forged through operational pressure rather than formal education."
         },
         {
           block_title: "Tactical Domain Mechanics",
           icon: "target",
-          content: "Sreeni's framework for enterprise-scale product configuration centers on a crucial distinction most practitioners miss: Oracle CPQ is not prepackaged software you deploy once. His approach focuses on building custom configuration logic for wildly different product types — electric cars, tractors, data center network equipment — each requiring bespoke validation rules, pricing waterfalls, and approval workflows. The core of his expertise lies in understanding that every client's CPQ implementation is essentially a custom engineering project disguised as a software deployment. He treats each engagement as a ground-up architecture challenge rather than a template-driven rollout."
+          content: "A core piece of tacit knowledge extracted is the expert's approach to custom configuration logic. They treat each client engagement as a ground-up architecture challenge rather than a template-driven rollout."
         },
         {
           block_title: "Pattern Breaks — What Conventional Wisdom Gets Wrong",
           icon: "zap",
-          content: "The most significant pattern break Sreeni revealed is the gap between how the industry perceives cloud software and how it actually works in enterprise reality. Conventional wisdom treats Oracle CPQ Cloud as a one-time setup: configure it, deploy it, move on. Sreeni's expert reality is fundamentally different — systems like Oracle CPQ require continuous agility because Oracle ships brutal quarterly software updates that can break existing custom configurations. His teams must constantly re-validate, re-test, and re-adapt their implementations every quarter. This is the single biggest piece of tacit knowledge that fresh engineers joining his team consistently underestimate."
+          content: "The expert revealed a significant gap between industry perception and enterprise reality, emphasizing the need for continuous agility and re-validation in environments that are typically assumed to be static."
         }
       ]
     });

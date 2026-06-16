@@ -13,69 +13,67 @@ const ScriptPage: React.FC = () => {
   const [themes, setThemes] = useState<any[]>([]);
   const [expertProfile, setExpertProfile] = useState<any>(null);
 
+  const expertId = localStorage.getItem('expert_id');
+  const icebreakerData = JSON.parse(localStorage.getItem('icebreaker') || '{}');
+
   useEffect(() => {
-    let step = 1;
-    setResearchStep(step);
-    const interval = setInterval(() => {
-      step++;
-      setResearchStep(step);
-      if (step === 4) {
-        clearInterval(interval);
+    if (!expertId) {
+      navigate('/');
+      return;
+    }
 
-        setExpertProfile({
-          expert_id: 'EXP-SRINI-001',
-          name: 'Sreeni Rayaprolu',
-          title: 'PWC Director',
-          years: 20,
-          domain: 'Oracle CPQ & CRM Architecture',
-          archetype: 'Extreme Idealist / Highly Traditional Leader',
-          persona_calibration: 'Deeply curious, high-respect, narrative-driven peer. Treats Sreeni as an extreme idealist who follows traditional philosophies.',
-          context_brief: 'Handles massive sales system designs for clients like Tesla, Cisco, and Bank of America while maintaining a traditional lifestyle.',
+    const generateScript = async () => {
+      try {
+        setResearchStep(1);
+        await new Promise(r => setTimeout(r, 800));
+        
+        setResearchStep(2);
+        const res = await fetch(`http://localhost:9120/generate-script/${expertId}`, {
+          method: 'POST'
         });
+        const data = await res.json();
+        
+        setResearchStep(3);
+        
+        if (data.status === 'success') {
+          setExpertProfile({
+            name: data.expert?.name || 'Expert',
+            domain: data.expert?.domain || 'Expertise Domain',
+            years: data.expert?.years_of_experience || '?',
+            title: data.expert?.current_title || '',
+            persona_calibration: `Using calibrated dynamic archetype rules (${data.expert?.archetype || 'balanced'}).`
+          });
 
-        setScript({
-          opening_icebreaker: "Sreeni, welcome to the studio. Everyone in the industry knows you today as a powerhouse PWC Director managing massive sales system designs for companies like Bank of America and Tesla. But looking at where it all began, your path wasn't a straight line—you started with a BSc, spent years navigating heavy career struggles in a completely non-IT landscape, and fought your way in through Deloitte. Take me back to that foundational era: How did you originally get into this space, and what was the spark that kept you going through those initial struggles?",
-          active_listening_cues: "Watch for transitions into his Deloitte era and his natural tendency to groom teams.",
-          interview_arc: {
-            phase_1_warmup: {
-              phase_goal: "Warmup — Establish trust & open the narrative",
-              questions: [
-                { id: "Q1", question_text: "Take me back to that foundational era: How did you originally get into this space, and what was the spark that kept you going through those initial struggles?", rationale: "Opens his personal origin story. A BSc-to-PWC-Director arc is rich with hidden turning points and unspoken lessons." },
-                { id: "Q2", question_text: "When you first entered the IT consulting world at Deloitte, what was the single hardest adjustment from your non-IT background?", rationale: "Extracts the tacit friction of a career pivot — the skills gap, the impostor syndrome, the survival strategies nobody writes about." }
-              ]
-            },
-            phase_2_deep_dives: {
-              phase_goal: "Deep Dive — Extract domain-specific tacit knowledge",
-              questions: [
-                { id: "Q3", question_text: "Walk me through your mental model when a client like Tesla comes to you and says 'We need CPQ.' How do you even begin to scope something that massive?", rationale: "Forces him to articulate the invisible decision framework he uses for scoping enterprise CPQ — the heuristics, the red flags, the gut checks." },
-                { id: "Q4", question_text: "You manage custom configurations for electric cars, tractors, and data center networks. How do you handle the fact that Oracle CPQ requires continuous agility due to brutal quarterly software updates?", rationale: "Targets the pattern-break: most people think cloud software is set-and-forget. His reality is constant adaptation." }
-              ]
-            },
-            phase_3_challenge: {
-              phase_goal: "Challenge — Probe edge cases and contrarian views",
-              questions: [
-                { id: "Q5", question_text: "What is the most common mistake fresh engineers make when they first touch an Oracle CPQ implementation?", rationale: "Extracts 'anti-pattern' knowledge — the mistakes only an expert can name because textbooks don't cover them." }
-              ]
-            },
-            phase_4_synthesis: {
-              phase_goal: "Synthesis — Consolidate and close the narrative",
-              questions: [
-                { id: "Q6", question_text: "If you had to distill your 20 years into one sentence of advice for a PWC fresher joining your team on Monday, what would it be?", rationale: "Compression question — forces the expert to crystallize their deepest belief into a single actionable takeaway." }
-              ]
-            }
-          }
-        });
+          const arc = data.script.interview_arc || data.script;
+          setScript({
+            opening_icebreaker: icebreakerData.opening_icebreaker || "Welcome to the studio.",
+            active_listening_cues: icebreakerData.active_listening_cues || "Listen carefully.",
+            interview_arc: arc
+          });
 
-        setThemes([
-          { theme_id: 1, theme_title: "Career Origins & The Non-IT Pivot", editorial_rationale: "His journey from BSc through career struggles to Deloitte and PWC Director — a rich, unspoken survival narrative." },
-          { theme_id: 2, theme_title: "Enterprise CPQ Architecture", editorial_rationale: "Core domain expertise: scoping, configuring, and deploying Oracle CPQ for massive clients like Tesla and Cisco." },
-          { theme_id: 3, theme_title: "Legacy-to-Cloud Migration Friction", editorial_rationale: "The hidden engineering pain of migrating from desktop Siebel CRM to Oracle CPQ Cloud under intense pressure." },
-          { theme_id: 4, theme_title: "Team Grooming & Traditional Leadership", editorial_rationale: "His natural tendency to groom teams, rooted in his traditional idealist philosophy and deep personal values." }
-        ]);
+          // The current backend script generator focuses on phases rather than distinct themes, 
+          // so we map phase goals to themes for the UI sidebar
+          const extractedThemes = Object.entries(arc || {}).map(([key, phase]: [string, any], idx) => ({
+            theme_id: idx,
+            theme_title: key.replace('block_', 'Block ').replace(/_/g, ' '),
+            editorial_rationale: phase.goal || "Phase goal",
+            tentative_duration: phase.tentative_duration_minutes || 20,
+            questions: phase.questions || []
+          }));
+          setThemes(extractedThemes);
+          
+          setTimeout(() => setResearchStep(4), 800);
+        } else {
+          console.error("Generation failed", data);
+          alert("Failed to generate script.");
+        }
+      } catch (err) {
+        console.error(err);
       }
-    }, 1500);
-    return () => clearInterval(interval);
-  }, []);
+    };
+
+    generateScript();
+  }, [expertId, navigate]);
 
   const toggleTheme = (id: number) => {
     setExpandedThemes(prev => {
@@ -95,9 +93,9 @@ const ScriptPage: React.FC = () => {
 
   if (researchStep < 4) {
     const steps = [
-      { id: 1, icon: Database, label: 'Loading Expert Profile — EXP-SRINI-001' },
+      { id: 1, icon: Database, label: 'Loading Expert Profile — EXP-DEMO-001' },
       { id: 2, icon: Sparkles, label: 'Extracting Core Themes from Intake' },
-      { id: 3, icon: FileText, label: 'Crafting Interview Script for Sreeni Rayaprolu' },
+      { id: 3, icon: FileText, label: 'Crafting Interview Script for Demo Expert' },
     ];
     return (
       <div className="research-page">
@@ -209,7 +207,7 @@ const ScriptPage: React.FC = () => {
               const isOpen = expandedThemes.has(t.theme_id);
               return (
                 <div key={t.theme_id} className={`theme-card ${isOpen ? 'theme-expanded' : ''}`}>
-                  <h4>{t.theme_title}</h4>
+                  <h4>{t.theme_title} <span style={{fontSize:'10px', marginLeft:'6px', color:'var(--accent)', fontWeight:'bold'}}>({t.tentative_duration}m)</span></h4>
                   <p>{t.editorial_rationale}</p>
                   <button className="theme-toggle" onClick={() => toggleTheme(t.theme_id)}>
                     <Eye size={11} /> {isOpen ? 'Hide' : 'Show'} Reasoning
@@ -223,8 +221,8 @@ const ScriptPage: React.FC = () => {
             {Object.entries(script?.interview_arc || {}).map(([key, phase]: [string, any]) => (
               <div key={key} className="phase-block">
                 <div className="phase-header">
-                  <h4>{key.replace('phase_', 'Phase ').replace(/_/g, ' ')}</h4>
-                  {phase.phase_goal && <small>{phase.phase_goal}</small>}
+                  <h4>{key.replace('block_', 'Block ').replace(/_/g, ' ')} <span style={{fontSize:'12px', marginLeft:'8px', color:'var(--accent)'}}>({phase.tentative_duration_minutes || 20}m)</span></h4>
+                  {phase.goal && <small>{phase.goal}</small>}
                 </div>
                 {phase.questions?.map((q: any) => {
                   const qId = q.question_id || q.id;

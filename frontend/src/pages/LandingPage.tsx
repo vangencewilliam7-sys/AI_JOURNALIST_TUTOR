@@ -10,25 +10,46 @@ const LandingPage: React.FC = () => {
   const [selectedDomain, setSelectedDomain] = useState<'Tutor' | 'IT' | 'Healthcare'>('Tutor');
   const [isSubmittingProfile, setIsSubmittingProfile] = useState(false);
   const [tutorProfile, setTutorProfile] = useState({
-    expert_id: 'EXP-SRINI-001',
-    full_name: 'Sreeni Rayaprolu',
-    current_title: 'PWC Director',
-    expertise_streams: 'Oracle CPQ, CRM Architecture',
-    years_of_experience: 20,
-    short_bio: 'Handles massive sales system designs for clients like Tesla, Cisco, and Bank of America. Specializes in enterprise-level Configure, Price, Quote (CPQ) systems and CRM architecture with deep roots in legacy Siebel-to-Cloud migrations.',
-    target_audience: 'Internal PWC freshers and fast-track engineering teams',
-    archetype: 'Extreme Idealist / Highly Traditional Leader',
-    archetype_notes: 'Respects deep-rooted personal philosophies. Southern direction orientation with Dakshinamurthi photo.',
+    full_name: '',
+    current_title: '',
+    expertise_streams: '',
+    years_of_experience: 0,
+    short_bio: '',
+    target_audience: '',
   });
 
   const handleProfileSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmittingProfile(true);
     try {
-      await new Promise(r => setTimeout(r, 1000));
-      navigate('/script');
+      const res = await fetch('http://localhost:9120/intake', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: tutorProfile.full_name,
+          domain: tutorProfile.expertise_streams,
+          stream_type: selectedDomain === 'Tutor' ? 'tutor' : 'general',
+          target_audience: tutorProfile.target_audience,
+          years_of_experience: tutorProfile.years_of_experience,
+          short_bio: tutorProfile.short_bio
+        })
+      });
+      const data = await res.json();
+      
+      if (data.status === 'success') {
+        localStorage.setItem('expert_id', data.expert_id);
+        localStorage.setItem('session_id', data.session_id);
+        if (data.icebreaker) {
+           localStorage.setItem('icebreaker', JSON.stringify(data.icebreaker));
+        }
+        navigate('/script');
+      } else {
+        console.error("Intake failed", data);
+        alert("Failed to initialize session. Make sure backend is running.");
+      }
     } catch (error) {
       console.error(error);
+      alert("Network error. Backend down?");
     } finally {
       setIsSubmittingProfile(false);
     }
@@ -55,10 +76,7 @@ const LandingPage: React.FC = () => {
                   <User size={16} /> Expert Identity
                 </div>
 
-                <div className="input-group">
-                  <label>Expert ID</label>
-                  <input readOnly className="input-field" value={tutorProfile.expert_id} style={{ background: 'rgba(0,0,0,0.03)', color: 'var(--accent)', fontWeight: 700 }} />
-                </div>
+
                 
                 <div className="input-group">
                   <label>Full Name</label>
@@ -96,15 +114,6 @@ const LandingPage: React.FC = () => {
                   <textarea required className="input-field" style={{ minHeight: '120px' }} value={tutorProfile.short_bio} onChange={e => setTutorProfile({...tutorProfile, short_bio: e.target.value})} />
                 </div>
 
-                <div className="input-group" style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px dashed var(--border)' }}>
-                  <label><Shield size={12} style={{ verticalAlign: '-2px', marginRight: '4px' }} />Archetype Configuration</label>
-                  <input required className="input-field" value={tutorProfile.archetype} onChange={e => setTutorProfile({...tutorProfile, archetype: e.target.value})} />
-                </div>
-
-                <div className="input-group">
-                  <label>Archetype Notes</label>
-                  <textarea className="input-field" style={{ minHeight: '60px' }} value={tutorProfile.archetype_notes} onChange={e => setTutorProfile({...tutorProfile, archetype_notes: e.target.value})} />
-                </div>
               </div>
 
             </div>

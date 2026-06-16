@@ -92,6 +92,8 @@ class LiveTurnRequest(BaseModel):
     session_id: str
     expert_answer: str
     current_script_question: Optional[str] = ""
+    active_block: Optional[str] = "Block 1: Personal Origin & Persona"
+    tangent_count: Optional[int] = 0
 
 class HomeworkPutRequest(BaseModel):
     human_manual_notes: str
@@ -130,6 +132,8 @@ async def intake_endpoint(request: ExpertIntakeRequest):
             "status": "active"
         }).execute()
         
+        logger.info(f"session_res.data: {session_res.data}")
+        
         return {
             "status": "success",
             "expert_id": expert_id,
@@ -144,8 +148,11 @@ async def intake_endpoint(request: ExpertIntakeRequest):
 async def generate_script_endpoint(expert_id: str):
     """Generate interview script for the current session iteration."""
     try:
+        expert_res = supabase.table("experts").select("*").eq("id", expert_id).execute()
+        expert = expert_res.data[0] if expert_res.data else {}
+        
         script_data = await interview_domain.generate_script(expert_id)
-        return {"status": "success", "script": script_data}
+        return {"status": "success", "script": script_data, "expert": expert}
     except Exception as e:
         logger.error(f"Script generation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -154,6 +161,18 @@ async def generate_script_endpoint(expert_id: str):
 # PHASE 3: LIVE INTERVIEW LOOP
 # ============================================================
 
+@app.get("/session/{session_id}")
+async def get_session_endpoint(session_id: str):
+    """Fetch session data including the generated script."""
+    try:
+        res = supabase.table("interview_sessions").select("*").eq("id", session_id).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {"status": "success", "session": res.data[0]}
+    except Exception as e:
+        logger.error(f"Get session error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/live-turn")
 async def live_turn_endpoint(request: LiveTurnRequest):
     """Phase 3: Classify intent and generate next conversational follow-up."""
@@ -161,7 +180,11 @@ async def live_turn_endpoint(request: LiveTurnRequest):
         result = await interview_domain.live_turn(
             session_id=request.session_id,
             expert_answer=request.expert_answer,
-            request_data={"current_script_question": request.current_script_question}
+            request_data={
+                "current_script_question": request.current_script_question,
+                "active_block": request.active_block,
+                "tangent_count": request.tangent_count
+            }
         )
         return result
     except Exception as e:

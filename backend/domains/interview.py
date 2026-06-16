@@ -7,14 +7,15 @@ from domains.base import BaseDomain
 from prompts import (
     ARCHETYPE_RULES,
     get_base_persona,
+    get_archetype_rules,
     DAY_ONE_OPENER_PROMPT,
     ITERATION_SCRIPT_PROMPT,
-    INTENT_CLASSIFIER_PROMPT,
-    LIVE_FOLLOWUP_PROMPT,
+    LIVE_COPILOT_PROMPT,
     GENERAL_SYNTHESIS_PROMPT,
     TUTOR_SYNTHESIS_PROMPT,
     HOMEWORK_GENERATOR_PROMPT,
-    FLYWHEEL_BRIDGE_PROMPT
+    FLYWHEEL_BRIDGE_PROMPT,
+    ARCHETYPE_CLASSIFIER_PROMPT
 )
 
 logger = logging.getLogger(__name__)
@@ -33,11 +34,35 @@ class InterviewDomain(BaseDomain):
     async def intake(self, expert_id: str) -> Dict[str, Any]:
         expert = await self._get_expert(expert_id)
         
-        # Fire Day 1 Opener prompt
+        # 1. Zero-Click Auto-Calibration: Determine Archetype
+        arch_res = self.llm.invoke(ARCHETYPE_CLASSIFIER_PROMPT.format(
+            domain=expert.get('domain', ''),
+            title=expert.get('current_title', ''),
+            short_bio=expert.get('short_bio', '')
+        ))
+        cleaned_arch = arch_res.content.strip()
+        if "```json" in cleaned_arch:
+            cleaned_arch = cleaned_arch.split("```json")[1].split("```")[0].strip()
+        
+        try:
+            arch_data = json.loads(cleaned_arch)
+            archetype = arch_data.get('archetype', 'the_tactician')
+        except Exception:
+            archetype = 'the_tactician'
+            
+        # Update the database with the chosen archetype
+        self.supabase.table("experts").update({"archetype": archetype}).eq("id", expert_id).execute()
+        
+        # Fire Day 1 Opener prompt with full expert profile
         res = self.llm.invoke(DAY_ONE_OPENER_PROMPT.format(
-            expert_name=expert['name'],
-            expert_domain=expert['domain'],
-            stream_type=expert['stream_type']
+            expert_name=expert.get('name', ''),
+            expert_title=expert.get('current_title', ''),
+            expert_domain=expert.get('domain', ''),
+            years_of_experience=expert.get('years_of_experience', 'Unknown'),
+            short_bio=expert.get('short_bio', ''),
+            target_audience=expert.get('target_audience', ''),
+            stream_type=expert.get('stream_type', 'general'),
+            archetype_rules=get_archetype_rules(archetype)
         ))
         
         cleaned = res.content.strip()
@@ -75,11 +100,16 @@ class InterviewDomain(BaseDomain):
         accumulated_knowledge_str = json.dumps(accumulated_knowledge, indent=2)
         homework_gaps_str = json.dumps(homework_gaps, indent=2)
         
+        archetype = expert.get('archetype', 'balanced')
         res = self.llm.invoke(ITERATION_SCRIPT_PROMPT.format(
-            expert_name=expert['name'],
-            expert_domain=expert['domain'],
-            stream_type=expert['stream_type'],
+            expert_name=expert.get('name', ''),
+            expert_title=expert.get('current_title', ''),
+            expert_domain=expert.get('domain', ''),
+            years_of_experience=expert.get('years_of_experience', 'Unknown'),
+            short_bio=expert.get('short_bio', ''),
+            stream_type=expert.get('stream_type', 'general'),
             iteration_number=iteration_number,
+            archetype_rules=get_archetype_rules(archetype),
             accumulated_knowledge_section=accumulated_knowledge_str,
             homework_gaps_section=homework_gaps_str
         ))
@@ -106,61 +136,98 @@ class InterviewDomain(BaseDomain):
         session = session_res.data[0]
         
         expert = await self._get_expert(session["expert_id"])
-        topic = expert["domain"]
-        stream_type = expert["stream_type"]
+        archetype = expert.get('archetype', 'balanced')
         
         # Append answer to transcript
         current_transcript = session.get("raw_transcript", "")
-        new_transcript = current_transcript + f"\\n\\n[EXPERT]: {expert_answer}"
+        new_transcript = current_transcript + f"\n\n[EXPERT]: {expert_answer}"
         
-        persona_prompt = get_base_persona(topic, stream_type)
-        
-        # 2. Get active script question. We assume the frontend passes `current_script_question`
-        current_script_question = request_data.get("current_script_question", "")
+        # 2. Get active script question and context from frontend
+        current_script_question = (request_data or {}).get("current_script_question", "")
         if not current_script_question:
-            # Fallback if frontend didn't pass it, just use generic context
             current_script_question = "General domain exploration."
             
-        # 3. Intent Classification
-        intent_res = self.llm.invoke(INTENT_CLASSIFIER_PROMPT.format(
-            current_question=current_script_question,
-            expert_answer=expert_answer
+        active_block = (request_data or {}).get("active_block", "Block 1: Personal Origin & Persona")
+        tangent_count = int((request_data or {}).get("tangent_count", 0))
+        
+        # Dynamic tangent limits based on the block
+        # Block 4 is the massive drill-down for course extraction, so it gets a much higher limit.
+        tangent_limit = 6 if "Block 4" in active_block else 2
+        
+        pacing_warning = ""
+        if tangent_count >= tangent_limit:
+            pacing_warning = f"WARNING: You have exhausted the tangent limit ({tangent_limit}) for this specific topic. You MUST wrap up and return intent='skip' to advance the interview."
+        
+        # 3. Build conversation history sliding window (last 3 turns)
+        conversation_history = self._build_conversation_history(current_transcript, max_turns=3)
+            
+        # 4. Single-pass: Intent Classification + Follow-up Generation
+        copilot_res = self.llm.invoke(LIVE_COPILOT_PROMPT.format(
+            active_block=active_block,
+            active_script_question=current_script_question,
+            conversation_history=conversation_history,
+            expert_answer=expert_answer,
+            archetype_rules=get_archetype_rules(archetype),
+            pacing_warning=pacing_warning
         ))
         
-        intent_data = {"intent": "substantive"}
+        copilot_data = {"intent": "substantive", "follow_up": None}
         try:
-            cl = intent_res.content.strip()
+            cl = copilot_res.content.strip()
             if "```json" in cl: cl = cl.split("```json")[1].split("```")[0].strip()
-            intent_data = json.loads(cl)
+            copilot_data = json.loads(cl)
         except Exception:
-            pass
+            logger.warning("Failed to parse copilot response, defaulting to substantive.")
             
         action = "follow_tangent"
-        if intent_data.get("intent") == "skip" or intent_data.get("intent") == "resolved":
+        next_question = copilot_data.get("follow_up")
+        
+        if copilot_data.get("intent") == "skip" or not next_question:
             action = "next_script_question"
+            next_question = None  # Frontend advances teleprompter
+        elif copilot_data.get("intent") == "off_topic":
+            action = "redirect_to_script"
             
-        # 4. Generate follow-up
-        if action == "next_script_question":
-            # Let the frontend load the next question from the script. We just acknowledge.
-            next_question = "Got it. Let's move on to the next topic."
-        else:
-            # Generate a deep-dive follow-up
-            scenario = f"ACTION: follow_tangent\\nTARGET INSTRUCTION: Ask a probing conversational follow-up to dig deeper into their last answer."
-            gen_res = self.llm.invoke(LIVE_FOLLOWUP_PROMPT.format(
-                persona=persona_prompt,
-                scenario_instruction=scenario,
-                expert_answer=expert_answer
-            ))
-            next_question = gen_res.content.strip()
-            
-        # Append AI question to transcript
-        new_transcript += f"\\n\\n[AI JOURNALIST]: {next_question}"
+        # Append AI question to transcript (if we generated one)
+        if next_question:
+            new_transcript += f"\n\n[AI JOURNALIST]: {next_question}"
         self.supabase.table("interview_sessions").update({"raw_transcript": new_transcript}).eq("id", session_id).execute()
         
         return {
             "question": next_question,
-            "decision": {"action": action, "intent": intent_data.get("intent")}
+            "decision": {
+                "action": action, 
+                "intent": copilot_data.get("intent"),
+                "reasoning": copilot_data.get("internal_reasoning", "")
+            }
         }
+
+    def _build_conversation_history(self, transcript: str, max_turns: int = 3) -> str:
+        """Build a sliding window of the last N HOST+EXPERT turn pairs."""
+        if not transcript:
+            return "(No conversation history yet)"
+        
+        lines = transcript.strip().split("\n")
+        turns = []
+        current_turn = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("[EXPERT]:") or line.startswith("[AI JOURNALIST]:"):
+                if current_turn:
+                    turns.append("\n".join(current_turn))
+                current_turn = [line]
+            else:
+                current_turn.append(line)
+        
+        if current_turn:
+            turns.append("\n".join(current_turn))
+        
+        # Take the last N turns
+        recent = turns[-max_turns:] if len(turns) > max_turns else turns
+        return "\n\n".join(recent) if recent else "(No conversation history yet)"
 
     async def synthesize(self, session_id: str) -> Dict[str, Any]:
         session_res = self.supabase.table("interview_sessions").select("*").eq("id", session_id).execute()
@@ -169,11 +236,17 @@ class InterviewDomain(BaseDomain):
         session = session_res.data[0]
         
         expert = await self._get_expert(session["expert_id"])
+        iteration_number = session.get("iteration_number", 1)
         
         transcript = session.get("raw_transcript", "")
         
-        # 1. General Synthesis (Applies to ALL streams)
-        gen_res = self.llm.invoke(GENERAL_SYNTHESIS_PROMPT.format(transcript=transcript))
+        # 1. General Synthesis (Applies to ALL streams) — with expert context
+        gen_res = self.llm.invoke(GENERAL_SYNTHESIS_PROMPT.format(
+            expert_name=expert.get('name', ''),
+            expert_domain=expert.get('domain', ''),
+            iteration_number=iteration_number,
+            transcript=transcript
+        ))
         cl_gen = gen_res.content.strip()
         if "```json" in cl_gen: cl_gen = cl_gen.split("```json")[1].split("```")[0].strip()
         general_data = json.loads(cl_gen)
@@ -207,7 +280,12 @@ class InterviewDomain(BaseDomain):
         # 2. Tutor Synthesis (If stream_type == 'tutor')
         tutor_data = {}
         if expert["stream_type"] == "tutor":
-            tut_res = self.llm.invoke(TUTOR_SYNTHESIS_PROMPT.format(transcript=transcript))
+            tut_res = self.llm.invoke(TUTOR_SYNTHESIS_PROMPT.format(
+                expert_name=expert.get('name', ''),
+                expert_domain=expert.get('domain', ''),
+                iteration_number=iteration_number,
+                transcript=transcript
+            ))
             cl_tut = tut_res.content.strip()
             if "```json" in cl_tut: cl_tut = cl_tut.split("```json")[1].split("```")[0].strip()
             tutor_data = json.loads(cl_tut)
@@ -254,11 +332,17 @@ class InterviewDomain(BaseDomain):
             raise HTTPException(status_code=404, detail="Session not found.")
         session = session_res.data[0]
         
+        expert = await self._get_expert(session["expert_id"])
+        iteration_number = session.get("iteration_number", 1)
+        
         transcript = session.get("raw_transcript", "")
         # Read the newly synthesized data
         session_synthesis_str = json.dumps(session.get("session_synthesis", {}), indent=2)
         
         res = self.llm.invoke(HOMEWORK_GENERATOR_PROMPT.format(
+            expert_name=expert.get('name', ''),
+            expert_domain=expert.get('domain', ''),
+            iteration_number=iteration_number,
             transcript=transcript,
             extracted_session_data=session_synthesis_str
         ))
@@ -269,22 +353,31 @@ class InterviewDomain(BaseDomain):
         self.supabase.table("homework_ledger").insert({
             "expert_id": session["expert_id"],
             "session_id": session_id,
-            "iteration_number": session["iteration_number"],
-            "ai_open_loops": hw_data.get("ai_open_loops", []),
-            "status": "pending"
+            "iteration_number": iteration_number,
+            "ai_open_loops": hw_data.get("ai_open_loops", [])
         }).execute()
         
         return {"status": "success", "homework": hw_data}
 
     async def flywheel_bridge(self, expert_id: str) -> Dict[str, Any]:
+        expert = await self._get_expert(expert_id)
+        archetype = expert.get('archetype', 'balanced')
+        
         # Fetch latest homework
         hw_res = self.supabase.table("homework_ledger").select("*").eq("expert_id", expert_id).order("created_at", desc=True).limit(1).execute()
         if not hw_res.data:
-            return {"opener": "Welcome back! What should we dive into today?"}
+            return {"bridge_opener": "Welcome back! What should we dive into today?", "internal_reasoning": "No homework ledger found."}
             
         hw = hw_res.data[0]
+        previous_day = hw.get("iteration_number", 1)
+        current_day = previous_day + 1
         
         res = self.llm.invoke(FLYWHEEL_BRIDGE_PROMPT.format(
+            expert_name=expert.get('name', ''),
+            expert_domain=expert.get('domain', ''),
+            previous_day=previous_day,
+            current_day=current_day,
+            archetype_rules=get_archetype_rules(archetype),
             ai_open_loops=json.dumps(hw.get("ai_open_loops", []), indent=2),
             human_manual_notes=hw.get("human_manual_notes", "")
         ))

@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { RefreshCw, PenTool, BrainCircuit, Mic, AlertTriangle, Eye, Loader2, CheckCircle, Database, Sparkles, FileText, Zap } from 'lucide-react';
 
+const API_BASE_URL = 'http://localhost:9120';
+
 const HomeworkPage: React.FC = () => {
   const navigate = useNavigate();
   const [generationPhase, setGenerationPhase] = useState<'idle' | 'loading' | 'typing' | 'done'>('idle');
@@ -9,16 +11,34 @@ const HomeworkPage: React.FC = () => {
   const [typedText, setTypedText] = useState('');
   const typingRef = useRef<number | null>(null);
 
-  const [homework] = useState([
-    {
-      id: 1,
-      gap: "Sreeni highlighted his deep-rooted understanding of configuration logic from British Telecom's legacy Siebel CRM days, but the conversation shifted to his career narrative before extracting the exact engineering friction encountered during that specific cloud migration. He mentioned 'brutal validation failures' and 'data mapping nightmares' but never unpacked a concrete example of a specific rule that broke.",
-    }
-  ]);
-
+  const [homeworkId, setHomeworkId] = useState<string | null>(null);
+  const [homework, setHomework] = useState<any[]>([]);
   const [manualNotes, setManualNotes] = useState('');
+  const [flywheelScript, setFlywheelScript] = useState('');
 
-  const flywheelScript = `Sreeni, yesterday we spent a lot of time charting out your journey, and you mentioned something fascinating—that your deep-rooted understanding of configuration logic comes from the old desktop Siebel CRM days with British Telecom. I was reflecting on that transition last night, and looking back at how heavy those legacy systems were, moving them to an agile cloud infrastructure like Oracle CPQ usually triggers brutal validation failures. Pick up right on that cliffhanger for me: When you were leading that migration, how did you handle the engineering friction when the legacy desktop rules clashed with the new cloud architecture?`;
+  // Fallback if not set in local storage
+  const expertId = localStorage.getItem('expert_id') || 'EXP-DEMO-001';
+
+  useEffect(() => {
+    const fetchHomework = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/homework/${expertId}`);
+        const data = await res.json();
+        if (data.status === 'success' && data.homework) {
+          setHomeworkId(data.homework.id);
+          setHomework(data.homework.ai_open_loops || []);
+          if (data.homework.human_manual_notes) {
+            setManualNotes(data.homework.human_manual_notes);
+          }
+        } else {
+          setHomework([]);
+        }
+      } catch (err) {
+        console.error("Failed to fetch homework", err);
+      }
+    };
+    fetchHomework();
+  }, [expertId]);
 
   const loadingSteps = [
     { icon: Database, label: 'Reading AI Open Loops from Homework Ledger...' },
@@ -28,25 +48,48 @@ const HomeworkPage: React.FC = () => {
     { icon: FileText, label: 'Crafting Day 2 Flywheel Bridge...' },
   ];
 
-  const handleFlywheel = () => {
+  const handleFlywheel = async () => {
     setGenerationPhase('loading');
     setLoadingStep(0);
-  };
 
-  // Loading steps animation
-  useEffect(() => {
-    if (generationPhase !== 'loading') return;
-    if (loadingStep >= loadingSteps.length) {
-      // Done loading, start typing
-      setGenerationPhase('typing');
-      setTypedText('');
-      return;
+    try {
+      // 1. Save manual notes first
+      if (homeworkId) {
+        await fetch(`${API_BASE_URL}/homework/${homeworkId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ human_manual_notes: manualNotes })
+        });
+      }
+
+      // 2. Trigger flywheel bridge & start next session
+      const res = await fetch(`${API_BASE_URL}/start-session/${expertId}`, {
+        method: 'POST'
+      });
+      const data = await res.json();
+      
+      if (data.status === 'success' && data.opener?.bridge_opener) {
+        setFlywheelScript(data.opener.bridge_opener);
+        if (data.session_id) {
+          localStorage.setItem('session_id', data.session_id);
+        }
+      } else {
+        setFlywheelScript("Welcome back. We had some great insights yesterday. Let's pick up where we left off.");
+      }
+    } catch (err) {
+      console.error(err);
+      setFlywheelScript("Welcome back. We had some great insights yesterday. Let's pick up where we left off.");
     }
-    const timer = setTimeout(() => {
-      setLoadingStep(prev => prev + 1);
-    }, 1200);
-    return () => clearTimeout(timer);
-  }, [generationPhase, loadingStep]);
+
+    // UX Animation for the steps
+    for (let i = 1; i <= loadingSteps.length; i++) {
+      await new Promise(r => setTimeout(r, 1200));
+      setLoadingStep(i);
+    }
+    
+    setGenerationPhase('typing');
+    setTypedText('');
+  };
 
   // Typewriter effect
   useEffect(() => {
@@ -64,7 +107,7 @@ const HomeworkPage: React.FC = () => {
     };
     type();
     return () => { if (typingRef.current) clearTimeout(typingRef.current); };
-  }, [generationPhase]);
+  }, [generationPhase, flywheelScript]);
 
   return (
     <div className="report-page" style={{ padding: '40px 20px', minHeight: '100vh', background: 'var(--bg)' }}>
@@ -76,7 +119,7 @@ const HomeworkPage: React.FC = () => {
             <span style={{ fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '1px' }}>Phase 5 & 6 — Morning-After Preparation</span>
           </div>
           <h1 style={{ fontSize: '32px', margin: '0 0 10px 0' }}>Homework Ledger</h1>
-          <p style={{ color: 'var(--text-dim)', margin: 0 }}>Session: SESS-001-DAY1 · Expert: Sreeni Rayaprolu · Domain: Oracle CPQ</p>
+          <p style={{ color: 'var(--text-dim)', margin: 0 }}>Expert ID: {expertId}</p>
         </header>
 
         {/* AI Open Loops */}
@@ -86,15 +129,34 @@ const HomeworkPage: React.FC = () => {
             <span style={{ fontSize: '12px', fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: '0.06em' }}>AI-Identified Open Loops</span>
           </div>
 
+          {homework.length === 0 && (
+            <p style={{ color: 'var(--text-dim)' }}>No open loops found for this expert yet. Complete a Day 1 session first.</p>
+          )}
+
           {homework.map((item, idx) => (
-            <div key={item.id} style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '12px', padding: '24px', marginBottom: '16px' }}>
+            <div key={idx} style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '12px', padding: '24px', marginBottom: '16px' }}>
               <div style={{ display: 'flex', gap: '12px' }}>
                 <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '12px', flexShrink: 0 }}>
                   {idx + 1}
                 </div>
                 <div>
-                  <h3 style={{ margin: '0 0 8px 0', fontSize: '15px' }}>Continuation Thread — Legacy Cloud Migration Friction</h3>
-                  <p style={{ color: 'var(--text-dim)', margin: 0, fontSize: '14px', lineHeight: '1.7' }}>{item.gap}</p>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                    <h3 style={{ margin: 0, fontSize: '15px' }}>{item.topic}</h3>
+                    {item.priority === 'High' && (
+                      <span style={{ background: 'rgba(239,68,68,0.1)', color: '#ef4444', fontSize: '10px', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold' }}>HIGH PRIORITY</span>
+                    )}
+                  </div>
+                  <p style={{ color: 'var(--text-dim)', margin: '0 0 12px 0', fontSize: '14px', lineHeight: '1.7' }}>{item.reasoning}</p>
+                  
+                  {item.expert_quote_hook && (
+                    <div style={{ background: 'rgba(0,0,0,0.05)', padding: '10px 14px', borderRadius: '6px', borderLeft: '2px solid var(--border)', fontSize: '13px', fontStyle: 'italic', marginBottom: '12px' }}>
+                      "{item.expert_quote_hook}"
+                    </div>
+                  )}
+
+                  <div style={{ fontSize: '13px', color: 'var(--accent)' }}>
+                    <strong>Suggested Follow-up:</strong> {item.suggested_followup}
+                  </div>
                 </div>
               </div>
             </div>
@@ -111,7 +173,7 @@ const HomeworkPage: React.FC = () => {
           <textarea 
             value={manualNotes}
             onChange={(e) => setManualNotes(e.target.value)}
-            placeholder="Add your overnight research here. Example: 'Found his old LinkedIn post about the British Telecom migration. He mentioned the validation engine had to be completely rewritten in 72 hours because the legacy Siebel rules used a different data type schema...'"
+            placeholder="Add your overnight research here. Example: 'Found his old LinkedIn post about the British Telecom migration. He mentioned the validation engine had to be completely rewritten in 72 hours...'"
             style={{ width: '100%', minHeight: '140px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px', color: 'var(--text)', fontSize: '14px', resize: 'vertical', lineHeight: '1.6' }}
             disabled={generationPhase !== 'idle'}
           />
@@ -127,7 +189,8 @@ const HomeworkPage: React.FC = () => {
             </p>
             <button 
               onClick={handleFlywheel}
-              style={{ background: 'var(--accent)', color: 'white', border: 'none', padding: '14px 28px', borderRadius: '8px', fontSize: '14px', fontWeight: 'bold', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+              disabled={!homeworkId}
+              style={{ background: homeworkId ? 'var(--accent)' : 'var(--border)', color: 'white', border: 'none', padding: '14px 28px', borderRadius: '8px', fontSize: '14px', fontWeight: 'bold', cursor: homeworkId ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
             >
               <RefreshCw size={18} />
               Trigger Flywheel Bridge
