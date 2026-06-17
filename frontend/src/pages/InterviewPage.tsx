@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Mic, MicOff, Send, HelpCircle, StopCircle, PauseCircle, Loader2, BrainCircuit, Eye, Target, Zap, FileText, ArrowRight } from 'lucide-react';
+import { Mic, MicOff, Send, PauseCircle, Loader2, BrainCircuit, Eye, Target, Zap, FileText, ArrowRight } from 'lucide-react';
 
 interface Message {
   id: string;
@@ -14,21 +14,34 @@ interface Message {
   };
 }
 
+// ─── 2D pointer position returned by advanceTeleprompter ─────────────────────
+interface Pointer {
+  blockIdx: number;
+  qIdx: number;
+}
+
 const InterviewPage: React.FC = () => {
   const navigate = useNavigate();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isTranscribing] = useState(false);
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [showDecision, setShowDecision] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const [showScriptSidebar, setShowScriptSidebar] = useState(true);
   const [scriptThemes, setScriptThemes] = useState<any[]>([]);
-  const [activeBlock, setActiveBlock] = useState('Block 1: Personal Origin & Persona');
   const [tangentCount, setTangentCount] = useState(0);
+
+  // ─── 2D Pointer State Machine ─────────────────────────────────────────────
+  const [activeBlockIdx, setActiveBlockIdx] = useState(0);
+  const [activeQuestionIdx, setActiveQuestionIdx] = useState(0);
+
+  // Derived values — always in sync with pointer, no extra state to desync
+  const activeBlock = scriptThemes[activeBlockIdx]?.theme_title ?? 'Block 1: Personal Origin & Persona';
+  const currentActiveQuestion = scriptThemes[activeBlockIdx]?.questions?.[activeQuestionIdx]?.question_text ?? '';
 
   const sessionId = localStorage.getItem('session_id');
   const icebreakerData = JSON.parse(localStorage.getItem('icebreaker') || '{}');
@@ -38,7 +51,7 @@ const InterviewPage: React.FC = () => {
       navigate('/');
       return;
     }
-    
+
     // Seed the conversation with a generic opening
     setMessages([
       {
@@ -68,9 +81,9 @@ const InterviewPage: React.FC = () => {
             questions: phase.questions || []
           }));
           setScriptThemes(extractedThemes);
-          if (extractedThemes.length > 0) {
-            setActiveBlock(extractedThemes[0].theme_title);
-          }
+          // Reset pointer to 0,0 whenever a new script loads
+          setActiveBlockIdx(0);
+          setActiveQuestionIdx(0);
         }
       })
       .catch(err => console.error("Failed to fetch session script", err));
@@ -81,44 +94,114 @@ const InterviewPage: React.FC = () => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages]);
 
+  // ─── advanceTeleprompter ──────────────────────────────────────────────────
+  // Returns the NEW pointer position synchronously so the caller can use it
+  // for display BEFORE React re-renders with the new state.
+  // Returns null if all blocks are exhausted (triggers end-session).
+  const advanceTeleprompter = useCallback((): Pointer | null => {
+    const questionsInBlock = scriptThemes[activeBlockIdx]?.questions?.length ?? 0;
+    const nextQIdx = activeQuestionIdx + 1;
+
+    if (nextQIdx < questionsInBlock) {
+      // More questions remain in the current block
+      setActiveQuestionIdx(nextQIdx);
+      return { blockIdx: activeBlockIdx, qIdx: nextQIdx };
+    }
+
+    // Current block exhausted — try the next block
+    const nextBlockIdx = activeBlockIdx + 1;
+    if (nextBlockIdx < scriptThemes.length) {
+      setActiveBlockIdx(nextBlockIdx);
+      setActiveQuestionIdx(0);
+      return { blockIdx: nextBlockIdx, qIdx: 0 };
+    }
+
+    // All blocks exhausted — fire end-session automatically
+    handleEndInterview();
+    return null;
+  }, [activeBlockIdx, activeQuestionIdx, scriptThemes]);
+
+  // ─── handleSend ──────────────────────────────────────────────────────────
   const handleSend = async (text: string) => {
     if (!text.trim() || !sessionId) return;
     setMessages(prev => [...prev, { id: Date.now().toString(), role: 'expert', text, timestamp: Date.now() }]);
     setInputText('');
     setIsLoading(true);
-    
+
     try {
+      // Always read from the pointer — never hardcoded
+      const currentQuestionText = currentActiveQuestion || 'General domain exploration.';
+
       const res = await fetch('http://localhost:9120/live-turn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
           expert_answer: text,
-          current_script_question: "General exploration", // Ideally mapped to active UI question
-          active_block: activeBlock,
+          current_script_question: currentQuestionText,   // ✅ real active question
+          active_block: activeBlock,                        // ✅ derived from pointer
           tangent_count: tangentCount
         })
       });
       const data = await res.json();
-      
-      const intent = data.decision?.intent || 'unknown';
-      if (intent === 'substantive') {
-        setTangentCount(prev => prev + 1);
-      } else if (intent === 'skip' || data.decision?.action === 'next_script_question') {
-        setTangentCount(0);
+
+      const action = data.decision?.action ?? '';
+      const intent = data.decision?.intent ?? 'unknown';
+      const reasoning = data.decision?.reasoning ?? 'Backend copilot decision';
+
+      let displayText = '';
+
+      // ─── Explicit action switch (no fall-through ambiguity) ──────────────
+      switch (action) {
+
+        case 'next_script_question': {
+          // 1. Reset tangent depth for the new question
+          setTangentCount(0);
+          // 2. Advance pointer and get the new position synchronously
+          const next = advanceTeleprompter();
+          // 3. Derive display text from the returned pointer (not stale state)
+          if (next) {
+            displayText =
+              scriptThemes[next.blockIdx]?.questions?.[next.qIdx]?.question_text
+              ?? "Great — let's keep going.";
+          } else {
+            displayText = "That wraps up all our topics — ending the session now.";
+          }
+          break;
+        }
+
+        case 'follow_tangent': {
+          // Increment tangent depth and display the AI-generated follow-up
+          setTangentCount(prev => prev + 1);
+          displayText = data.question ?? '';
+          break;
+        }
+
+        case 'redirect_to_script': {
+          // Display the redirect question without changing the pointer
+          displayText = data.question ?? "Let's steer back to the topic at hand.";
+          break;
+        }
+
+        default: {
+          // Fallback: display whatever the backend returned
+          displayText = data.question ?? "Let's continue.";
+          break;
+        }
       }
-      
+
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'ai',
-        text: data.question || "Let's move on to the next topic.",
+        text: displayText,
         timestamp: Date.now(),
         decision: {
-          intent_classification: data.decision?.intent || 'unknown',
-          internal_reasoning: data.decision?.reasoning || 'Backend copilot decision',
-          action: data.decision?.action || 'next'
+          intent_classification: intent,
+          internal_reasoning: reasoning,
+          action: action
         }
       }]);
+
     } catch (err) {
       console.error(err);
       alert("Failed to get AI response.");
@@ -127,10 +210,11 @@ const InterviewPage: React.FC = () => {
     }
   };
 
+  // ─── handleEndInterview ───────────────────────────────────────────────────
   const handleEndInterview = async () => {
     if (!confirm('Pause the interview and run the Homework Engine?')) return;
     if (!sessionId) return;
-    
+
     setIsSynthesizing(true);
     try {
       await fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST' });
@@ -142,14 +226,17 @@ const InterviewPage: React.FC = () => {
     }
   };
 
+  // ─── handleNextBlock (manual override button) ─────────────────────────────
   const handleNextBlock = () => {
-    const currentIndex = scriptThemes.findIndex(t => t.theme_title === activeBlock);
-    if (currentIndex >= 0 && currentIndex < scriptThemes.length - 1) {
-      setActiveBlock(scriptThemes[currentIndex + 1].theme_title);
+    const nextBlockIdx = activeBlockIdx + 1;
+    if (nextBlockIdx < scriptThemes.length) {
+      setActiveBlockIdx(nextBlockIdx);
+      setActiveQuestionIdx(0);
       setTangentCount(0);
     }
   };
 
+  // ─── Synthesizing screen ──────────────────────────────────────────────────
   if (isSynthesizing) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg)', color: 'var(--text)' }}>
@@ -160,6 +247,7 @@ const InterviewPage: React.FC = () => {
     );
   }
 
+  // ─── Main render ──────────────────────────────────────────────────────────
   return (
     <div style={{ display: 'flex', height: '100vh', width: '100vw', overflow: 'hidden', background: 'var(--bg)' }}>
       <div className="chat-page" style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -176,15 +264,16 @@ const InterviewPage: React.FC = () => {
             </div>
           </div>
         </div>
-        
+
         <div className="chat-header-right" style={{ gap: '12px', display: 'flex', alignItems: 'center' }}>
-          <div className="progress-section" style={{ marginRight: '16px', display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+          <div className="progress-section" style={{ marginRight: '16px', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', maxWidth: '360px' }}>
             <label style={{ fontSize: '11px', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Active Block: {activeBlock}</label>
-            <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text)' }}>
-              Tangent Depth: {tangentCount}
+            <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text)', textAlign: 'right', marginTop: '2px', opacity: 0.8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              Q{activeQuestionIdx + 1}: {currentActiveQuestion.slice(0, 60)}{currentActiveQuestion.length > 60 ? '…' : ''}
             </div>
+            <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>Tangent Depth: {tangentCount}</div>
           </div>
-          
+
           <button className="btn-ghost" style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={handleNextBlock}>
             Next Block <ArrowRight size={14} style={{ marginLeft: '6px', verticalAlign: '-2px' }} />
           </button>
@@ -246,8 +335,8 @@ const InterviewPage: React.FC = () => {
 
       <div className="chat-input-bar">
         <div className="chat-input-wrapper">
-          <button 
-            className={`mic-btn ${isRecording ? 'recording' : ''}`} 
+          <button
+            className={`mic-btn ${isRecording ? 'recording' : ''}`}
             onClick={() => setIsRecording(!isRecording)}
             disabled={isTranscribing}
           >
@@ -279,21 +368,33 @@ const InterviewPage: React.FC = () => {
             <p style={{ margin: '4px 0 0', fontSize: '12px', color: 'var(--text-dim)' }}>Read these questions to guide the interview.</p>
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-            {scriptThemes.map(theme => (
+            {scriptThemes.map((theme, blockIdx) => (
               <div key={theme.theme_id} style={{ marginBottom: '24px' }}>
                 <h4 style={{ fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)', marginBottom: '12px', display: 'flex', justifyContent: 'space-between' }}>
                   <span>{theme.theme_title}</span>
                   <span style={{ color: 'var(--accent)', fontWeight: 'bold' }}>{theme.tentative_duration}m</span>
                 </h4>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                  {theme.questions.map((q: any) => (
-                    <div key={q.id} style={{ background: '#f8fafc', border: '1px solid var(--border)', borderRadius: '8px', padding: '12px' }}>
-                      <p style={{ margin: 0, fontSize: '13px', lineHeight: '1.5', fontWeight: 500 }}>"{q.question_text}"</p>
-                      <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginTop: '8px', fontStyle: 'italic' }}>
-                        Rationale: {q.rationale}
+                  {theme.questions.map((q: any, qIdx: number) => {
+                    const isActive = blockIdx === activeBlockIdx && qIdx === activeQuestionIdx;
+                    return (
+                      <div
+                        key={q.id}
+                        style={{
+                          background: isActive ? 'rgba(124,106,255,0.08)' : '#f8fafc',
+                          border: `1px solid ${isActive ? 'var(--accent)' : 'var(--border)'}`,
+                          borderRadius: '8px',
+                          padding: '12px',
+                          transition: 'border-color 0.2s, background 0.2s'
+                        }}
+                      >
+                        <p style={{ margin: 0, fontSize: '13px', lineHeight: '1.5', fontWeight: isActive ? 700 : 500 }}>"{q.question_text}"</p>
+                        <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginTop: '8px', fontStyle: 'italic' }}>
+                          Rationale: {q.rationale}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ))}
