@@ -6,6 +6,7 @@
 .env.*.local
 .env.bak
 .env.tmp
+.env .development
 
 # ========================
 # Python
