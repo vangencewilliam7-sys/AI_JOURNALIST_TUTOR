@@ -73,13 +73,22 @@ const InterviewPage: React.FC = () => {
       .then(data => {
         if (data.status === 'success' && data.session?.script) {
           const arc = data.session.script.interview_arc || data.session.script;
-          const extractedThemes = Object.entries(arc || {}).map(([key, phase]: [string, any], idx) => ({
-            theme_id: idx,
-            theme_title: key.replace('block_', 'Block ').replace(/_/g, ' '),
-            editorial_rationale: phase.goal || "Phase goal",
-            tentative_duration: phase.tentative_duration_minutes || 20,
-            questions: phase.questions || []
-          }));
+          // Sort entries by block number to guarantee correct display order (block_1 → block_2 → … → block_5)
+          // Object.entries() does NOT guarantee insertion order on plain objects, so we sort explicitly.
+          const extractedThemes = Object.entries(arc || {})
+            .sort(([keyA], [keyB]) => {
+              // Extract the leading number from keys like "block_1_origin", "block_2_learning_journey", etc.
+              const numA = parseInt(keyA.match(/\d+/)?.[0] ?? '0', 10);
+              const numB = parseInt(keyB.match(/\d+/)?.[0] ?? '0', 10);
+              return numA - numB;
+            })
+            .map(([key, phase]: [string, any], idx) => ({
+              theme_id: idx,
+              theme_title: key.replace('block_', 'Block ').replace(/_/g, ' '),
+              editorial_rationale: phase.goal || "Phase goal",
+              tentative_duration: phase.tentative_duration_minutes || 20,
+              questions: phase.questions || []
+            }));
           setScriptThemes(extractedThemes);
           // Reset pointer to 0,0 whenever a new script loads
           setActiveBlockIdx(0);
@@ -116,8 +125,8 @@ const InterviewPage: React.FC = () => {
       return { blockIdx: nextBlockIdx, qIdx: 0 };
     }
 
-    // All blocks exhausted — fire end-session automatically
-    handleEndInterview();
+    // All blocks exhausted — fire end-session automatically (skip confirm, system-triggered)
+    handleEndInterview(true);
     return null;
   }, [activeBlockIdx, activeQuestionIdx, scriptThemes]);
 
@@ -211,12 +220,14 @@ const InterviewPage: React.FC = () => {
   };
 
   // ─── handleEndInterview ───────────────────────────────────────────────────
-  const handleEndInterview = async () => {
-    if (!confirm('Pause the interview and run the Homework Engine?')) return;
+  // skipConfirm: pass true when auto-triggered by the teleprompter completing all blocks
+  const handleEndInterview = async (skipConfirm = false) => {
+    if (!skipConfirm && !confirm('Pause the interview and run the Homework Engine?')) return;
     if (!sessionId) return;
 
     setIsSynthesizing(true);
     try {
+      // Wait for synthesis + homework generation to fully complete before navigating
       await fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST' });
       navigate('/homework');
     } catch (err) {

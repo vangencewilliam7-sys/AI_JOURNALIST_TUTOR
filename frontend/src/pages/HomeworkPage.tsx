@@ -20,6 +20,12 @@ const HomeworkPage: React.FC = () => {
   const expertId = localStorage.getItem('expert_id') || 'EXP-DEMO-001';
 
   useEffect(() => {
+    // Retry with backoff — the backend synthesis may still be writing when this page first loads.
+    // We retry up to 5 times (every 2 seconds) before giving up.
+    let attempts = 0;
+    const MAX_ATTEMPTS = 5;
+    const RETRY_DELAY_MS = 2000;
+
     const fetchHomework = async () => {
       try {
         const res = await fetch(`${API_BASE_URL}/homework/${expertId}`);
@@ -30,13 +36,21 @@ const HomeworkPage: React.FC = () => {
           if (data.homework.human_manual_notes) {
             setManualNotes(data.homework.human_manual_notes);
           }
-        } else {
-          setHomework([]);
+          return; // success — stop retrying
         }
       } catch (err) {
         console.error("Failed to fetch homework", err);
       }
+
+      // If we're here, homework wasn't ready yet
+      attempts++;
+      if (attempts < MAX_ATTEMPTS) {
+        setTimeout(fetchHomework, RETRY_DELAY_MS);
+      } else {
+        setHomework([]); // give up after 5 tries
+      }
     };
+
     fetchHomework();
   }, [expertId]);
 
@@ -139,24 +153,43 @@ const HomeworkPage: React.FC = () => {
                 <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '12px', flexShrink: 0 }}>
                   {idx + 1}
                 </div>
-                <div>
+                <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
                     <h3 style={{ margin: 0, fontSize: '15px' }}>{item.topic}</h3>
-                    {item.priority === 'High' && (
-                      <span style={{ background: 'rgba(239,68,68,0.1)', color: '#ef4444', fontSize: '10px', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold' }}>HIGH PRIORITY</span>
+                    {(item.priority === 'High' || item.priority === 'HIGH' || item.priority === 'CRITICAL') && (
+                      <span style={{ background: 'rgba(239,68,68,0.1)', color: '#ef4444', fontSize: '10px', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold', textTransform: 'uppercase' }}>{item.priority}</span>
                     )}
                   </div>
-                  <p style={{ color: 'var(--text-dim)', margin: '0 0 12px 0', fontSize: '14px', lineHeight: '1.7' }}>{item.reasoning}</p>
-                  
-                  {item.expert_quote_hook && (
-                    <div style={{ background: 'rgba(0,0,0,0.05)', padding: '10px 14px', borderRadius: '6px', borderLeft: '2px solid var(--border)', fontSize: '13px', fontStyle: 'italic', marginBottom: '12px' }}>
-                      "{item.expert_quote_hook}"
+
+                  {item.resource_mentioned && (
+                    <div style={{ marginBottom: '12px', fontSize: '14px' }}>
+                      <span style={{ color: 'var(--text-dim)', fontWeight: 600 }}>Resource: </span>
+                      <span style={{ color: 'var(--accent)' }}>{item.resource_mentioned}</span>
                     </div>
                   )}
 
-                  <div style={{ fontSize: '13px', color: 'var(--accent)' }}>
-                    <strong>Suggested Follow-up:</strong> {item.suggested_followup}
-                  </div>
+                  {item.what_expert_claimed && (
+                    <div style={{ background: 'rgba(0,0,0,0.05)', padding: '10px 14px', borderRadius: '6px', borderLeft: '2px solid var(--border)', fontSize: '13px', fontStyle: 'italic', marginBottom: '12px', color: 'var(--text-dim)' }}>
+                      "{item.what_expert_claimed}"
+                    </div>
+                  )}
+
+                  {item.validation_status && (
+                    <div style={{ marginBottom: '12px', padding: '12px', borderRadius: '8px', border: `1px solid ${item.validation_status === 'Valid' ? '#10b981' : item.validation_status === 'Invalid' ? '#ef4444' : '#f59e0b'}`, background: item.validation_status === 'Valid' ? 'rgba(16, 185, 129, 0.05)' : item.validation_status === 'Invalid' ? 'rgba(239, 68, 68, 0.05)' : 'rgba(245, 158, 11, 0.05)' }}>
+                       <div style={{ fontSize: '12px', fontWeight: 'bold', color: item.validation_status === 'Valid' ? '#10b981' : item.validation_status === 'Invalid' ? '#ef4444' : '#f59e0b', marginBottom: '4px' }}>
+                         ✓ AI FACT CHECK: {item.validation_status.toUpperCase()}
+                       </div>
+                       <div style={{ fontSize: '13px', color: 'var(--text)' }}>
+                         {item.validation_reasoning}
+                       </div>
+                    </div>
+                  )}
+
+                  {item.host_homework_instructions && (
+                    <div style={{ fontSize: '13px', color: 'var(--text-dim)' }}>
+                      <strong>Host Instructions:</strong> {item.host_homework_instructions}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
