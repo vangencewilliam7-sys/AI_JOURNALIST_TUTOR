@@ -39,7 +39,7 @@ from .script_generator import ITERATION_SCRIPT_PROMPT
 from .live_follow_up import LIVE_COPILOT_PROMPT
 
 # 5. Post-Session Synthesis (async extraction after "End Session")
-from .post_session_synthesis import GENERAL_SYNTHESIS_PROMPT, TUTOR_SYNTHESIS_PROMPT, HOMEWORK_GENERATOR_PROMPT
+from .post_session_synthesis import GENERAL_SYNTHESIS_PROMPT, TUTOR_SYNTHESIS_PROMPT, HOMEWORK_GENERATOR_PROMPT, RESOURCE_VALIDATION_PROMPT
 from .flywheel_bridge import FLYWHEEL_BRIDGE_PROMPT
 from .archetype_classifier import ARCHETYPE_CLASSIFIER_PROMPT
 
@@ -53,6 +53,7 @@ __all__ = [
     'GENERAL_SYNTHESIS_PROMPT',
     'TUTOR_SYNTHESIS_PROMPT',
     'HOMEWORK_GENERATOR_PROMPT',
+    'RESOURCE_VALIDATION_PROMPT',
     'FLYWHEEL_BRIDGE_PROMPT',
     'ARCHETYPE_CLASSIFIER_PROMPT'
 ]

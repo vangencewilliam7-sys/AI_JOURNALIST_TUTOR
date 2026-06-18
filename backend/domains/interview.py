@@ -14,6 +14,7 @@ from prompts import (
     GENERAL_SYNTHESIS_PROMPT,
     TUTOR_SYNTHESIS_PROMPT,
     HOMEWORK_GENERATOR_PROMPT,
+    RESOURCE_VALIDATION_PROMPT,
     FLYWHEEL_BRIDGE_PROMPT,
     ARCHETYPE_CLASSIFIER_PROMPT
 )
@@ -300,6 +301,7 @@ class InterviewDomain(BaseDomain):
             if not cb_res.data:
                 self.supabase.table("curriculum_blueprints").insert({
                     "expert_id": expert["id"],
+                    "session_id": session_id,          # ← required NOT NULL column
                     "course_modules": tutor_data.get("course_modules", [])
                 }).execute()
             else:
@@ -311,6 +313,7 @@ class InterviewDomain(BaseDomain):
                 combined_modules = existing_modules + new_modules
                 self.supabase.table("curriculum_blueprints").update({
                     "course_modules": combined_modules,
+                    "session_id": session_id,          # ← keep it current
                     "iteration_last_updated": session["iteration_number"]
                 }).eq("id", cb["id"]).execute()
         
@@ -349,6 +352,28 @@ class InterviewDomain(BaseDomain):
         cl = res.content.strip()
         if "```json" in cl: cl = cl.split("```json")[1].split("```")[0].strip()
         hw_data = json.loads(cl)
+        
+        # Run AI Automated Validation on extracted resources
+        ai_open_loops = hw_data.get("ai_open_loops", [])
+        for loop in ai_open_loops:
+            resource_mentioned = loop.get("resource_mentioned")
+            what_expert_claimed = loop.get("what_expert_claimed")
+            
+            if resource_mentioned and what_expert_claimed:
+                try:
+                    val_res = self.llm.invoke(RESOURCE_VALIDATION_PROMPT.format(
+                        resource_mentioned=resource_mentioned,
+                        what_expert_claimed=what_expert_claimed
+                    ))
+                    val_cl = val_res.content.strip()
+                    if "```json" in val_cl: val_cl = val_cl.split("```json")[1].split("```")[0].strip()
+                    val_data = json.loads(val_cl)
+                    loop["validation_status"] = val_data.get("validation_status", "Needs Human Review")
+                    loop["validation_reasoning"] = val_data.get("validation_reasoning", "")
+                except Exception as e:
+                    logger.error(f"Failed to validate resource {resource_mentioned}: {e}")
+                    loop["validation_status"] = "Needs Human Review"
+                    loop["validation_reasoning"] = "Validation failed due to server error."
         
         self.supabase.table("homework_ledger").insert({
             "expert_id": session["expert_id"],

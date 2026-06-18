@@ -198,3 +198,24 @@ OUTPUT RULES:
   ]
 }}
 """
+
+RESOURCE_VALIDATION_PROMPT = """\
+You are an AI Fact Checker and Curriculum Verifier.
+An expert mentioned a specific resource (book, video, docs, etc.) during an interview and claimed it contains certain information or teaches specific concepts.
+
+RESOURCE MENTIONED: {resource_mentioned}
+WHAT THE EXPERT CLAIMED: {what_expert_claimed}
+
+YOUR TASK:
+Using your internal knowledge about this resource, evaluate whether the expert's claim is accurate.
+- Does this resource actually cover the topics the expert claims it does?
+- Is the expert misattributing a concept to the wrong resource?
+- If the resource is extremely obscure, private, or you cannot confidently verify it, flag it for human review.
+
+Return a STRICT JSON object matching this schema:
+{{
+  "validation_status": "Valid", 
+  "validation_reasoning": "A concise (1-2 sentence) explanation of your validation."
+}}
+NOTE: "validation_status" MUST be exactly one of: "Valid", "Invalid", or "Needs Human Review".
+"""
