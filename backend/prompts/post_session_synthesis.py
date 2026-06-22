@@ -45,6 +45,9 @@ DEPTH SCORE RUBRIC — Use this to calculate interview_depth_score:
 - 9-10: Expert revealed genuinely novel, never-before-documented knowledge. Multiple "I've never told anyone this" moments.
 
 GROUNDING RULE: The "expert_quote" field MUST be a VERBATIM substring copied directly from the transcript. Do NOT paraphrase, summarize, or clean up the grammar. Copy exactly as spoken.
+TRACEABILITY RULE: You MUST provide a "transcript_reference" (e.g., the timestamp or turn ID) alongside every expert_quote so it can be located later.
+
+ANTIPATTERNS: Identify tools, frameworks, or methodologies the expert explicitly warns against or refuses to use. Output these inside the `pattern_breaks` array and set `"type": "antipattern"`.
 
 FEW-SHOT EXAMPLE — What IS tacit knowledge:
 {{
@@ -61,6 +64,14 @@ FEW-SHOT EXAMPLE — What is NOT tacit knowledge (DO NOT extract):
 }}
 → ❌ REJECT THIS. This is a textbook fact anyone can Google.
 
+EXTRACTION LIMITS (CRITICAL):
+To ensure highest quality and prevent noise, you MUST adhere to these strict limits:
+- tacit_insights: MAXIMUM 5 items (only the most profound).
+- mental_models: MAXIMUM 3 items.
+- pattern_breaks: MAXIMUM 3 items.
+- war_stories: MAXIMUM 3 items.
+- weak_coverage_areas: MAXIMUM 3 items.
+
 Return a STRICT JSON object matching this schema:
 {{
   "report_title": "Domain-specific title based on the interview content",
@@ -68,16 +79,16 @@ Return a STRICT JSON object matching this schema:
   "interview_depth_score": 8,
   "summary": "2-3 sentence executive summary of what was learned",
   "tacit_insights": [
-    {{ "insight": "Unwritten rule", "why_tacit": "Why it's not obvious", "confidence": "HIGH | MEDIUM | LOW", "expert_quote": "Verbatim quote from transcript" }}
+    {{ "insight": "Unwritten rule", "why_tacit": "Why it's not obvious", "confidence": "HIGH | MEDIUM | LOW", "expert_quote": "Verbatim quote from transcript", "transcript_reference": "timestamp/turn ID" }}
   ],
   "mental_models": [
-    {{ "model_name": "Name", "application": "How they use it", "expert_quote": "Verbatim quote" }}
+    {{ "model_name": "Name", "application": "How they use it", "expert_quote": "Verbatim quote", "transcript_reference": "timestamp/turn ID" }}
   ],
   "pattern_breaks": [
-    {{ "conventional_approach": "What the industry standard is", "expert_approach": "What they actually do", "reasoning": "Why they deviate", "expert_quote": "Verbatim quote" }}
+    {{ "type": "standard | antipattern", "conventional_approach": "What the industry standard is", "expert_approach": "What they actually do", "reasoning": "Why they deviate or warn against it", "expert_quote": "Verbatim quote", "transcript_reference": "timestamp/turn ID" }}
   ],
   "war_stories": [
-    {{ "title": "Story title", "summary": "What happened", "encoded_lesson": "The tacit lesson embedded in the story", "why_untextbookable": "Why this lesson can't be learned from a book" }}
+    {{ "title": "Story title", "summary": "What happened", "encoded_lesson": "The tacit lesson embedded in the story", "why_untextbookable": "Why this lesson can't be learned from a book", "transcript_reference": "timestamp/turn ID" }}
   ],
   "weak_coverage_areas": [
     {{ "topic": "Topic where the expert's answer was shallow or rehearsed", "observation": "What they said that signals surface-level knowledge", "depth_needed": "What a DEEPER answer would reveal" }}
@@ -111,7 +122,13 @@ The "system_prompt" field must contain ALL of these sections:
 
 INFERRED FLAG RULE:
 - Set "inferred": false → if the expert explicitly discussed this topic in the transcript.
-- Set "inferred": true → if the topic was NEVER discussed but is logically necessary to complete the curriculum. For example, if the expert teaches advanced configuration but never mentioned basics, you may infer a "Fundamentals" module — but you MUST flag it as inferred.
+- Set "inferred": true → if the topic was NEVER discussed but is logically necessary to complete the curriculum. For example, if the expert teaches advanced configuration but never mentioned basics, you may infer a "Fundamentals" module — but you MUST flag it as inferred. If true, you MUST populate the "inference_rationale" field explaining why this leap in logic was necessary.
+
+LITMUS TESTS: Identify the specific questions, scenarios, or tests the expert uses in the real world to assess if someone actually understands a concept, rather than just reciting the textbook definition. Extract these into the "litmus_test" field for each topic.
+
+EXTRACTION LIMITS (CRITICAL):
+- course_structure.modules: Extract as many as naturally fit the curriculum.
+- structured_tacit_notes: MAXIMUM 5 themes total (focus only on the most critical takeaways).
 
 Return a STRICT JSON object matching this schema:
 {{
@@ -137,7 +154,9 @@ Return a STRICT JSON object matching this schema:
             "key_concepts": ["Concept 1", "Concept 2"],
             "suggested_format": "video lecture | hands-on exercise | quiz | case study",
             "tutor_insight": "Specific nugget FROM THE INTERVIEW about WHY this matters",
-            "inferred": false
+            "litmus_test": "How the expert specifically tests competence on this topic",
+            "inferred": false,
+            "inference_rationale": "Why this was inferred (only if inferred: true, else null)"
           }}
         ]
       }}
@@ -164,8 +183,12 @@ RAW TRANSCRIPT:
 {transcript}
 
 TASK: 
-Identify every specific resource the expert mentioned (e.g., a specific book, a YouTube channel, a mentor, an official documentation page, or a course). 
-For each resource, generate a "Verification Task" for the human Host. The Host needs to go look at that resource and see if the content matches what the expert claimed they learned from it.
+Scan the transcript for two highly specific types of information that require external verification:
+
+1. RESOURCE MENTIONS: Any specific book, YouTube channel, official documentation, course, or mentor the expert claimed they learned from.
+2. BOLD OPERATIONAL CLAIMS: Any hard, definitive statement the expert makes about how a technology behaves in the real world that might contradict official documentation or be outdated (e.g., "AWS Lambda cold starts always take 5 seconds with Java," or "Oracle updates break custom configs every 90 days").
+
+For each item identified, generate a "Verification Task" for the human Host or the research team.
 
 CONCRETE EXAMPLE:
 Transcript excerpt:
@@ -182,17 +205,18 @@ Analysis:
 }}
 
 OUTPUT RULES:
-- Only extract tasks for actual resources mentioned (books, courses, videos, mentors, docs). 
+- Only extract tasks for actual resources mentioned (books, courses, videos, mentors, docs) or bold operational claims.
 - Rank them by priority. CRITICAL means it is foundational to the curriculum.
-- Output STRICTLY in the following JSON format.
+- Output STRICTLY in the following JSON format using the key `knowledge_gaps` to map directly to the database column.
 
 {{
-  "ai_open_loops": [
+  "knowledge_gaps": [
     {{
+      "type": "resource_check | operational_claim",
       "topic": "The core topic being discussed.",
-      "resource_mentioned": "The exact book, video, or resource mentioned.",
-      "what_expert_claimed": "What the expert specifically claimed they learned from it.",
-      "host_homework_instructions": "Clear instructions for the human host on what to verify in this resource.",
+      "the_claim": "What the expert specifically claimed (e.g., 'I learned Redis LRU policies from this video' OR 'React context re-renders everything').",
+      "source_mentioned": "The exact resource mentioned, if applicable. (Null if it's an operational claim).",
+      "verification_instructions": "Highly specific instructions for the human host on HOW to verify this. (e.g., 'Check Hussein Nasser's playlist for LRU eviction' or 'Search Reddit/StackOverflow to see if this React Context issue is still true in the current version.')",
       "priority": "CRITICAL | HIGH | MEDIUM"
     }}
   ]
@@ -200,22 +224,24 @@ OUTPUT RULES:
 """
 
 RESOURCE_VALIDATION_PROMPT = """\
-You are an AI Fact Checker and Curriculum Verifier.
-An expert mentioned a specific resource (book, video, docs, etc.) during an interview and claimed it contains certain information or teaches specific concepts.
+You are an AI Search Query Generator.
+An expert made a specific claim or referenced a specific resource during an interview.
 
 RESOURCE MENTIONED: {resource_mentioned}
 WHAT THE EXPERT CLAIMED: {what_expert_claimed}
 
 YOUR TASK:
-Using your internal knowledge about this resource, evaluate whether the expert's claim is accurate.
-- Does this resource actually cover the topics the expert claims it does?
-- Is the expert misattributing a concept to the wrong resource?
-- If the resource is extremely obscure, private, or you cannot confidently verify it, flag it for human review.
+You have been given a Verification Task. Your job is to generate highly optimized Google Search queries to verify if this claim is accurate based on current, real-world data.
+Do NOT attempt to validate this yourself using internal knowledge.
 
-Return a STRICT JSON object matching this schema:
+Return a JSON array of exactly 3 search queries:
 {{
-  "validation_status": "Valid", 
-  "validation_reasoning": "A concise (1-2 sentence) explanation of your validation."
+  "search_queries": [
+    "optimized search query 1",
+    "optimized search query 2",
+    "optimized search query 3"
+  ]
 }}
-NOTE: "validation_status" MUST be exactly one of: "Valid", "Invalid", or "Needs Human Review".
 """
+
+

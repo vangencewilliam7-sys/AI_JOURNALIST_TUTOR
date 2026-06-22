@@ -244,6 +244,21 @@ const InterviewPage: React.FC = () => {
       setActiveBlockIdx(nextBlockIdx);
       setActiveQuestionIdx(0);
       setTangentCount(0);
+
+      // Immediately push the new script question to the chat feed for testing
+      const newQuestion = scriptThemes[nextBlockIdx]?.questions?.[0]?.question_text || "Let's move on to the next topic.";
+      
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        role: 'ai',
+        text: newQuestion,
+        timestamp: Date.now(),
+        decision: {
+          intent_classification: 'manual_skip',
+          internal_reasoning: 'Host manually advanced to the next block.',
+          action: 'script_question'
+        }
+      }]);
     }
   };
 
