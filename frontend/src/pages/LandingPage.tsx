@@ -1,16 +1,18 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import {
-  BrainCircuit, Database, ChevronRight, Sparkles, Cpu, Activity, BookOpen, Loader2, CloudDownload, User, Shield
+  BrainCircuit, Database, ChevronRight, Sparkles, Cpu, Activity, BookOpen, Loader2, CloudDownload, User, Shield, LogOut
 } from 'lucide-react';
+import { supabase } from '../supabaseClient';
 
 const LandingPage: React.FC = () => {
   const navigate = useNavigate();
+  const { session } = useAuth();
   const [view, setView] = useState<'landing' | 'tutor_setup' | 'ingest'>('landing');
   const [selectedDomain, setSelectedDomain] = useState<'Tutor' | 'IT' | 'Healthcare'>('Tutor');
   const [isSubmittingProfile, setIsSubmittingProfile] = useState(false);
   const [tutorProfile, setTutorProfile] = useState({
-    full_name: '',
     current_title: '',
     expertise_streams: '',
     years_of_experience: 0,
@@ -18,15 +20,19 @@ const LandingPage: React.FC = () => {
     target_audience: '',
   });
 
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    navigate('/login');
+  };
+
   const handleProfileSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmittingProfile(true);
     try {
       const res = await fetch('http://localhost:9120/intake', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token}` },
         body: JSON.stringify({
-          name: tutorProfile.full_name,
           domain: tutorProfile.expertise_streams,
           stream_type: selectedDomain === 'Tutor' ? 'tutor' : 'general',
           target_audience: tutorProfile.target_audience,
@@ -78,11 +84,6 @@ const LandingPage: React.FC = () => {
 
 
                 
-                <div className="input-group">
-                  <label>Full Name</label>
-                  <input required className="input-field" value={tutorProfile.full_name} onChange={e => setTutorProfile({...tutorProfile, full_name: e.target.value})} />
-                </div>
-
                 <div className="input-group">
                   <label>Current Title</label>
                   <input required className="input-field" value={tutorProfile.current_title} onChange={e => setTutorProfile({...tutorProfile, current_title: e.target.value})} />
@@ -163,7 +164,12 @@ const LandingPage: React.FC = () => {
           <div className="landing-logo-icon"><BrainCircuit size={20} /></div>
           AI Journalist
         </div>
-        <button className="btn-ghost" onClick={() => navigate('/dashboard')}>Homework Dashboard</button>
+        <div className="landing-nav-actions">
+          <button className="btn-ghost" onClick={() => navigate('/dashboard')}>Homework Dashboard</button>
+          <button className="btn-ghost" onClick={handleSignOut} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <LogOut size={14} /> Log Out
+          </button>
+        </div>
       </nav>
       <div className="landing-hero">
         <h1 className="landing-title">Extract Your<br />Unwritten Knowledge.</h1>

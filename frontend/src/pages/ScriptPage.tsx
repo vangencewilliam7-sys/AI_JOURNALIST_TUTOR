@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import { BrainCircuit, Play, Cpu, Eye, Target, Database, FileText, MessageSquare, GitBranch, Activity, Sparkles, CheckCircle, Loader2, User, Mic } from 'lucide-react';
 
 const ScriptPage: React.FC = () => {
   const navigate = useNavigate();
+  const { session } = useAuth();
   const [researchStep, setResearchStep] = useState(0);
   const [showFramework, setShowFramework] = useState(false);
   const [expandedThemes, setExpandedThemes] = useState<Set<number>>(new Set());
@@ -28,7 +30,7 @@ const ScriptPage: React.FC = () => {
         await new Promise(r => setTimeout(r, 800));
         
         setResearchStep(2);
-        const res = await fetch(`http://localhost:9120/generate-script/${expertId}`, {
+        const res = await fetch(`http://localhost:9120/generate-script`, { headers: { 'Authorization': `Bearer ${session?.access_token}` },
           method: 'POST'
         });
         const data = await res.json();

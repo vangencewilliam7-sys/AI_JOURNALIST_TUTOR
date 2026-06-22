@@ -1,4 +1,9 @@
+# Move this to the very top!
 import os
+env_path = os.path.join(os.path.dirname(__file__), '.env')
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=env_path, override=True)
+
 import re
 import json
 import logging
@@ -10,21 +15,18 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 from supabase import create_client, Client
-from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from domains.interview import InterviewDomain
+from dependencies import get_current_expert_id
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-env_path = os.path.join(os.path.dirname(__file__), '.env')
-load_dotenv(dotenv_path=env_path, override=True)
 logger.info(f"Loading .env from: {os.path.abspath(env_path)}")
 
 # --- MONKEY PATCH FOR SSL INTERCEPTION ---
@@ -46,9 +48,22 @@ httpx.Client.__init__ = _new_sync_init
 
 # Database Setup
 SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("SUPABASE_DB_URL")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+# Fallback in case Windows os.environ fails to update
+if not SUPABASE_URL:
+    from dotenv import dotenv_values
+    config = dotenv_values(env_path)
+    SUPABASE_URL = config.get("SUPABASE_URL")
+    SUPABASE_SERVICE_ROLE_KEY = config.get("SUPABASE_SERVICE_ROLE_KEY") or config.get("SUPABASE_ANON_KEY")
+
+if not SUPABASE_URL:
+    raise ValueError(f"CRITICAL: Could not find SUPABASE_URL in {env_path}")
+
+
+# WARNING: If RLS is enabled, you MUST use the SERVICE_ROLE_KEY here for the backend to bypass RLS,
+# or pass the user token to the client on a per-request basis. We use service_role here.
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 app = FastAPI(title="AI Journalist Platform - Backend (6-Phase Framework)")
 
@@ -76,7 +91,7 @@ interview_domain = InterviewDomain(llm, supabase, llm_fast, embeddings_model)
 # ============================================================
 
 class ExpertIntakeRequest(BaseModel):
-    name: str
+    name: Optional[str] = None
     domain: str
     stream_type: str  # 'general' or 'tutor'
     # Tutor specific
@@ -103,12 +118,11 @@ class HomeworkPutRequest(BaseModel):
 # ============================================================
 
 @app.post("/intake")
-async def intake_endpoint(request: ExpertIntakeRequest):
+async def intake_endpoint(request: ExpertIntakeRequest, current_expert_id: str = Depends(get_current_expert_id)):
     """Phase 2: Save expert profile and generate Day 1 Icebreaker."""
     try:
-        # Insert Expert
-        expert_res = supabase.table("experts").insert({
-            "name": request.name,
+        # Update Expert (row already created by Auth Trigger)
+        expert_res = supabase.table("experts").update({
             "domain": request.domain,
             "stream_type": request.stream_type,
             "course_title": request.course_title,
@@ -118,9 +132,9 @@ async def intake_endpoint(request: ExpertIntakeRequest):
             "years_of_experience": request.years_of_experience,
             "short_bio": request.short_bio,
             "linkedin_url": request.linkedin_url
-        }).execute()
+        }).eq("id", current_expert_id).execute()
         
-        expert_id = expert_res.data[0]["id"]
+        expert_id = current_expert_id
         
         # Fire Intake domain logic to get icebreaker
         icebreaker_data = await interview_domain.intake(expert_id)
@@ -154,14 +168,14 @@ async def intake_endpoint(request: ExpertIntakeRequest):
         logger.error(f"Intake error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/generate-script/{expert_id}")
-async def generate_script_endpoint(expert_id: str):
+@app.post("/generate-script")
+async def generate_script_endpoint(current_expert_id: str = Depends(get_current_expert_id)):
     """Generate interview script for the current session iteration."""
     try:
-        expert_res = supabase.table("experts").select("*").eq("id", expert_id).execute()
+        expert_res = supabase.table("experts").select("*").eq("id", current_expert_id).execute()
         expert = expert_res.data[0] if expert_res.data else {}
         
-        script_data = await interview_domain.generate_script(expert_id)
+        script_data = await interview_domain.generate_script(current_expert_id)
         return {"status": "success", "script": script_data, "expert": expert}
     except Exception as e:
         logger.error(f"Script generation error: {e}")
@@ -172,11 +186,11 @@ async def generate_script_endpoint(expert_id: str):
 # ============================================================
 
 @app.get("/session/{session_id}")
-async def get_session_endpoint(session_id: str):
+async def get_session_endpoint(session_id: str, current_expert_id: str = Depends(get_current_expert_id)):
     """Fetch session data including the generated script."""
     try:
         res = supabase.table("interview_sessions").select("*").eq("id", session_id).execute()
-        if not res.data:
+        if not res.data or res.data[0]["expert_id"] != current_expert_id:
             raise HTTPException(status_code=404, detail="Session not found")
         return {"status": "success", "session": res.data[0]}
     except Exception as e:
@@ -184,9 +198,14 @@ async def get_session_endpoint(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/live-turn")
-async def live_turn_endpoint(request: LiveTurnRequest, background_tasks: BackgroundTasks):
+async def live_turn_endpoint(request: LiveTurnRequest, background_tasks: BackgroundTasks, current_expert_id: str = Depends(get_current_expert_id)):
     """Phase 3: Classify intent and generate next conversational follow-up."""
     try:
+        # Check ownership
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", request.session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
         result = await interview_domain.live_turn(
             session_id=request.session_id,
             expert_answer=request.expert_answer,
@@ -247,9 +266,13 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 # ============================================================
 
 @app.post("/end-session/{session_id}")
-async def end_session_endpoint(session_id: str):
+async def end_session_endpoint(session_id: str, current_expert_id: str = Depends(get_current_expert_id)):
     """Phase 4 & 5: Run extraction on full transcript and generate open loops."""
     try:
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
         # Mark ended_at
         supabase.table("interview_sessions").update({
             "ended_at": datetime.now(timezone.utc).isoformat()
@@ -271,11 +294,11 @@ async def end_session_endpoint(session_id: str):
         logger.error(f"End session error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/homework/{expert_id}")
-async def get_homework(expert_id: str):
+@app.get("/homework")
+async def get_homework(current_expert_id: str = Depends(get_current_expert_id)):
     """Fetch latest homework ledger for dashboard."""
     try:
-        res = supabase.table("homework_ledger").select("*").eq("expert_id", expert_id).order("created_at", desc=True).limit(1).execute()
+        res = supabase.table("homework_ledger").select("*").eq("expert_id", current_expert_id).order("created_at", desc=True).limit(1).execute()
         if not res.data:
             return {"status": "success", "homework": None}
         return {"status": "success", "homework": res.data[0]}
@@ -283,9 +306,14 @@ async def get_homework(expert_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/homework/{homework_id}")
-async def put_homework(homework_id: str, request: HomeworkPutRequest):
+async def put_homework(homework_id: str, request: HomeworkPutRequest, current_expert_id: str = Depends(get_current_expert_id)):
     """Journalist saves manual research notes."""
     try:
+        # Verify ownership
+        hw_res = supabase.table("homework_ledger").select("expert_id").eq("id", homework_id).execute()
+        if not hw_res.data or hw_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
         supabase.table("homework_ledger").update({
             "human_manual_notes": request.human_manual_notes,
             "status": "completed"
@@ -298,17 +326,17 @@ async def put_homework(homework_id: str, request: HomeworkPutRequest):
 # PHASE 6: FLYWHEEL BRIDGE
 # ============================================================
 
-@app.post("/start-session/{expert_id}")
-async def start_session_endpoint(expert_id: str):
+@app.post("/start-session")
+async def start_session_endpoint(current_expert_id: str = Depends(get_current_expert_id)):
     """Phase 6: Create new session iteration and generate trust-signal opener."""
     try:
         # Find latest iteration number
-        sessions_res = supabase.table("interview_sessions").select("iteration_number").eq("expert_id", expert_id).order("iteration_number", desc=True).limit(1).execute()
+        sessions_res = supabase.table("interview_sessions").select("iteration_number").eq("expert_id", current_expert_id).order("iteration_number", desc=True).limit(1).execute()
         next_iter = 2
         if sessions_res.data:
             next_iter = sessions_res.data[0]["iteration_number"] + 1
 
-        expert_res = supabase.table("experts").select("*").eq("id", expert_id).execute()
+        expert_res = supabase.table("experts").select("*").eq("id", current_expert_id).execute()
         expert_name = expert_res.data[0]["name"] if expert_res.data else "Expert"
 
         # Create a dedicated knowledge source for this session's vector embeddings
@@ -322,7 +350,7 @@ async def start_session_endpoint(expert_id: str):
 
         # Create new session
         session_res = supabase.table("interview_sessions").insert({
-            "expert_id": expert_id,
+            "expert_id": current_expert_id,
             "iteration_number": next_iter,
             "status": "active",
             "live_transcript_source_id": source_id
@@ -330,7 +358,7 @@ async def start_session_endpoint(expert_id: str):
         session_id = session_res.data[0]["id"]
         
         # Fire Flywheel Bridge
-        opener_data = await interview_domain.flywheel_bridge(expert_id)
+        opener_data = await interview_domain.flywheel_bridge(current_expert_id)
         
         return {
             "status": "success",
@@ -346,12 +374,12 @@ async def start_session_endpoint(expert_id: str):
 # KNOWLEDGE REPORTS (DASHBOARD)
 # ============================================================
 
-@app.get("/knowledge-report/{expert_id}")
-async def get_knowledge_report(expert_id: str):
+@app.get("/knowledge-report")
+async def get_knowledge_report(current_expert_id: str = Depends(get_current_expert_id)):
     """Returns accumulated expert profile + curriculum blueprints."""
     try:
-        ep_res = supabase.table("expert_profile").select("*").eq("expert_id", expert_id).execute()
-        cb_res = supabase.table("curriculum_blueprints").select("*").eq("expert_id", expert_id).execute()
+        ep_res = supabase.table("expert_profile").select("*").eq("expert_id", current_expert_id).execute()
+        cb_res = supabase.table("curriculum_blueprints").select("*").eq("expert_id", current_expert_id).execute()
         
         return {
             "status": "success",
@@ -432,9 +460,15 @@ async def ingest_documents_endpoint(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     domain: str = Form(...),
-    user_session_id: str = Form(...)
+    user_session_id: str = Form(...),
+    current_expert_id: str = Depends(get_current_expert_id)
 ):
     try:
+        # Check ownership
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", user_session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
         temp_paths = []
         filenames = []
         for file in files:

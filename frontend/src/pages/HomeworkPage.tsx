@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import { RefreshCw, PenTool, BrainCircuit, Mic, AlertTriangle, Eye, Loader2, CheckCircle, Database, Sparkles, FileText, Zap } from 'lucide-react';
 
 const API_BASE_URL = 'http://localhost:9120';
 
 const HomeworkPage: React.FC = () => {
   const navigate = useNavigate();
+  const { session } = useAuth();
   const [generationPhase, setGenerationPhase] = useState<'idle' | 'loading' | 'typing' | 'done'>('idle');
   const [loadingStep, setLoadingStep] = useState(0);
   const [typedText, setTypedText] = useState('');
@@ -28,7 +30,7 @@ const HomeworkPage: React.FC = () => {
 
     const fetchHomework = async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/homework/${expertId}`);
+        const res = await fetch(`${API_BASE_URL}/homework`, { headers: { 'Authorization': `Bearer ${session?.access_token}` } });
         const data = await res.json();
         if (data.status === 'success' && data.homework) {
           setHomeworkId(data.homework.id);
@@ -71,7 +73,7 @@ const HomeworkPage: React.FC = () => {
       if (homeworkId) {
         await fetch(`${API_BASE_URL}/homework/${homeworkId}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token}` },
           body: JSON.stringify({ human_manual_notes: manualNotes })
         });
       }
