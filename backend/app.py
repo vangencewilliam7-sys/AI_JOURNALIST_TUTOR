@@ -69,7 +69,7 @@ embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 
 # Domain Registry (Unified)
-interview_domain = InterviewDomain(llm, supabase)
+interview_domain = InterviewDomain(llm, supabase, llm_fast, embeddings_model)
 
 # ============================================================
 # MODELS
@@ -125,11 +125,21 @@ async def intake_endpoint(request: ExpertIntakeRequest):
         # Fire Intake domain logic to get icebreaker
         icebreaker_data = await interview_domain.intake(expert_id)
         
+        # Create a dedicated knowledge source for this session's vector embeddings
+        source_res = supabase.table("knowledge_sources").insert({
+            "source_type": "transcript",
+            "title": f"Live Interview - {request.name} - Iteration 1",
+            "global_summary": "Auto-generated vector memory for live interview session.",
+            "author_or_channel": "AI Journalist"
+        }).execute()
+        source_id = source_res.data[0]["id"]
+        
         # Create Iteration 1 session
         session_res = supabase.table("interview_sessions").insert({
             "expert_id": expert_id,
             "iteration_number": 1,
-            "status": "active"
+            "status": "active",
+            "live_transcript_source_id": source_id
         }).execute()
         
         logger.info(f"session_res.data: {session_res.data}")
@@ -174,7 +184,7 @@ async def get_session_endpoint(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/live-turn")
-async def live_turn_endpoint(request: LiveTurnRequest):
+async def live_turn_endpoint(request: LiveTurnRequest, background_tasks: BackgroundTasks):
     """Phase 3: Classify intent and generate next conversational follow-up."""
     try:
         result = await interview_domain.live_turn(
@@ -183,9 +193,20 @@ async def live_turn_endpoint(request: LiveTurnRequest):
             request_data={
                 "current_script_question": request.current_script_question,
                 "active_block": request.active_block,
-                "tangent_count": request.tangent_count
+                "tangent_count": request.tangent_count  # Used as boundary signal (== 0 means new script Q)
             }
         )
+
+        # Long-Term Vector Memory: embed the expert's answer semantically (background is fine here)
+        background_tasks.add_task(
+            interview_domain.background_embed_turn,
+            request.session_id,
+            request.expert_answer,
+            embeddings_model
+        )
+        # NOTE: Scratchpad update now runs synchronously inside live_turn()
+        # using llm_fast. Removed from background tasks to prevent stale memory.
+
         return result
     except Exception as e:
         logger.error(f"Live turn error: {e}")
@@ -287,11 +308,24 @@ async def start_session_endpoint(expert_id: str):
         if sessions_res.data:
             next_iter = sessions_res.data[0]["iteration_number"] + 1
 
+        expert_res = supabase.table("experts").select("*").eq("id", expert_id).execute()
+        expert_name = expert_res.data[0]["name"] if expert_res.data else "Expert"
+
+        # Create a dedicated knowledge source for this session's vector embeddings
+        source_res = supabase.table("knowledge_sources").insert({
+            "source_type": "transcript",
+            "title": f"Live Interview - {expert_name} - Iteration {next_iter}",
+            "global_summary": "Auto-generated vector memory for live interview session.",
+            "author_or_channel": "AI Journalist"
+        }).execute()
+        source_id = source_res.data[0]["id"]
+
         # Create new session
         session_res = supabase.table("interview_sessions").insert({
             "expert_id": expert_id,
             "iteration_number": next_iter,
-            "status": "active"
+            "status": "active",
+            "live_transcript_source_id": source_id
         }).execute()
         session_id = session_res.data[0]["id"]
         
@@ -372,7 +406,7 @@ async def background_ingest_documents(session_id: str, file_paths: List[str], fi
             chunks = chunk_by_characters(text)
             
             source_res = supabase.table("knowledge_sources").insert({
-                "source_type": "document",
+                "source_type": "transcript",
                 "title": fname,
                 "global_summary": f"Uploaded document for session {session_id}",
                 "author_or_channel": "User Upload"

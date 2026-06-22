@@ -1,6 +1,7 @@
 import json
+import re
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
 from fastapi import HTTPException
 
 from domains.base import BaseDomain
@@ -16,15 +17,22 @@ from prompts import (
     HOMEWORK_GENERATOR_PROMPT,
     RESOURCE_VALIDATION_PROMPT,
     FLYWHEEL_BRIDGE_PROMPT,
-    ARCHETYPE_CLASSIFIER_PROMPT
+    ARCHETYPE_CLASSIFIER_PROMPT,
+    BACKGROUND_EMBED_FILTER_PROMPT,
+    RETRIEVAL_GATE_PROMPT,
+    SCRATCHPAD_UPDATE_PROMPT,
+    OBJECTIVE_SATISFACTION_PROMPT,
+    OBJECTIVE_REQUIREMENTS
 )
 
 logger = logging.getLogger(__name__)
 
 class InterviewDomain(BaseDomain):
-    def __init__(self, llm, supabase):
+    def __init__(self, llm, supabase, llm_fast=None, embeddings_model=None):
         self.llm = llm
         self.supabase = supabase
+        self.llm_fast = llm_fast or llm
+        self.embeddings_model = embeddings_model
 
     async def _get_expert(self, expert_id: str) -> Dict[str, Any]:
         res = self.supabase.table("experts").select("*").eq("id", expert_id).execute()
@@ -135,50 +143,227 @@ class InterviewDomain(BaseDomain):
         if not session_res.data:
             raise HTTPException(status_code=404, detail="Active session not found.")
         session = session_res.data[0]
-        
+
         expert = await self._get_expert(session["expert_id"])
         archetype = expert.get('archetype', 'balanced')
-        
-        # Append answer to transcript
-        current_transcript = session.get("raw_transcript", "")
-        new_transcript = current_transcript + f"\n\n[EXPERT]: {expert_answer}"
-        
-        # 2. Get active script question and context from frontend
+
+        # ── FIX 1.3 — Block validation (server-side, trusted) ────────────────
+        requested_block = (request_data or {}).get("active_block", "Block 1: Personal Origin & Persona")
+        active_block = self._validate_and_persist_block(session, session_id, requested_block)
+        # ─────────────────────────────────────────────────────────────────────
+
+        # 2. Get active script question
         current_script_question = (request_data or {}).get("current_script_question", "")
         if not current_script_question:
             current_script_question = "General domain exploration."
-            
-        active_block = (request_data or {}).get("active_block", "Block 1: Personal Origin & Persona")
-        tangent_count = int((request_data or {}).get("tangent_count", 0))
-        
-        # Dynamic tangent limits based on the block
-        # Block 4 is the massive drill-down for course extraction, so it gets a much higher limit.
+
+        # ── FIX 1.1 — Build transcript with boundary stamping ────────────────
+        # The frontend sends tangent_count=0 when it just advanced the script.
+        # We use this ONLY to stamp a [SCRIPT] boundary in the transcript so
+        # the server-side tangent counter can detect topic resets reliably.
+        client_tangent_count = int((request_data or {}).get("tangent_count", 0))
+        current_transcript = session.get("raw_transcript", "")
+        if client_tangent_count == 0 and current_transcript:
+            # Frontend advanced to a new script question — stamp a boundary
+            new_transcript = (
+                current_transcript
+                + f"\n\n[SCRIPT]: {current_script_question}"
+                + f"\n\n[EXPERT]: {expert_answer}"
+            )
+        else:
+            new_transcript = current_transcript + f"\n\n[EXPERT]: {expert_answer}"
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── FIX 1.3 — Server-side tangent count (browser-crash-proof) ────────
+        tangent_count = self._compute_server_tangent_count(current_transcript, client_count=client_tangent_count)
         tangent_limit = 6 if "Block 4" in active_block else 2
-        
         pacing_warning = ""
         if tangent_count >= tangent_limit:
-            pacing_warning = f"WARNING: You have exhausted the tangent limit ({tangent_limit}) for this specific topic. You MUST wrap up and return intent='skip' to advance the interview."
-        
-        # 3. Build conversation history sliding window (last 3 turns)
-        conversation_history = self._build_conversation_history(current_transcript, max_turns=3)
-            
-        # 4. Single-pass: Intent Classification + Follow-up Generation
-        copilot_res = self.llm.invoke(LIVE_COPILOT_PROMPT.format(
+            pacing_warning = (
+                f"WARNING: You have asked {tangent_count} follow-ups on this topic "
+                f"(limit = {tangent_limit}). You MUST return intent='skip' now to advance."
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
+        # 3. Build conversation history sliding window
+        conversation_history = self._build_conversation_history(current_transcript, max_turns=6)
+
+        # ── FIX 1.1 — Sync scratchpad update (always fresh before the prompt) ─
+        # Previously this ran in the background AFTER the response was sent,
+        # so the AI always had stale memory. Now we update it synchronously
+        # using the fast model before building the prompt.
+        current_scratchpad = session.get("live_scratchpad", {})
+        live_scratchpad_str = json.dumps(current_scratchpad, indent=2)  # fallback
+        try:
+            scratchpad_turns = self._build_conversation_history(
+                current_transcript + f"\n\n[EXPERT]: {expert_answer}", max_turns=4
+            )
+            sp_res = self.llm_fast.invoke(SCRATCHPAD_UPDATE_PROMPT.format(
+                current_scratchpad=json.dumps(current_scratchpad, indent=2),
+                new_transcript=scratchpad_turns
+            ))
+            sp_cl = sp_res.content.strip()
+            if "```json" in sp_cl:
+                sp_cl = sp_cl.split("```json")[1].split("```")[0].strip()
+            updated_scratchpad = json.loads(sp_cl)
+            # Persist immediately — next turn reads a fresh scratchpad
+            self.supabase.table("interview_sessions").update(
+                {"live_scratchpad": updated_scratchpad}
+            ).eq("id", session_id).execute()
+            live_scratchpad_str = json.dumps(updated_scratchpad, indent=2)
+        except Exception as e:
+            logger.warning(f"Sync scratchpad update failed, using prior state: {e}")
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Phase Objective Map ───────────────────────────────────────────────
+        script = session.get("script") or {}
+        phase_objectives_str, missing_objectives = self._compute_phase_objectives(
+            active_block=active_block,
+            transcript=current_transcript
+        )
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── FIX 2.4 — Retrieval Gate with objective-anchored embedding ────────
+        gate_res = self.llm_fast.invoke(RETRIEVAL_GATE_PROMPT.format(
+            active_script_question=current_script_question,
+            conversation_history=self._build_conversation_history(current_transcript, max_turns=2)
+        ))
+
+        retrieved_context = "None"
+        if gate_res.content.strip().upper() == "YES" and self.embeddings_model:
+            source_id = session.get("live_transcript_source_id")
+            if source_id:
+                # Anchor the retrieval to what we NEED next (missing objectives)
+                # rather than what was just said — avoids retrieving more of the same topic
+                retrieval_anchor = current_script_question
+                if missing_objectives:
+                    retrieval_anchor += " " + " ".join(missing_objectives[:2])
+                try:
+                    query_emb = self.embeddings_model.embed_query(retrieval_anchor)
+                    rpc_res = self.supabase.rpc('match_knowledge_chunks', {
+                        'query_embedding': query_emb,
+                        'match_threshold': 0.7,
+                        'match_count': 10
+                    }).execute()
+                    matches = [
+                        r['content'] for r in rpc_res.data
+                        if r.get('knowledge_sources', {}).get('id') == source_id
+                    ]
+                    if matches:
+                        retrieved_context = "\n".join(matches)
+                except Exception as e:
+                    logger.error(f"Retrieval error: {e}")
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── EXTRACTION SATISFACTION EVALUATOR ─────────────────────────────
+        # Runs via llm_fast BEFORE the main copilot prompt.
+        # Produces a BINARY verdict: SATISFIED or NEEDS_MORE.
+        # The verdict is injected as a hard constraint into the prompt
+        # so the AI cannot rationalize drilling deeper when done.
+        # Targets the first MISSING objective from the phase map.
+        satisfaction_verdict = "NOT_EVALUATED"
+        satisfaction_missing = "N/A"
+        current_objective_label = missing_objectives[0] if missing_objectives else None
+
+        if current_objective_label:
+            obj_requirements = OBJECTIVE_REQUIREMENTS.get(
+                current_objective_label,
+                "The expert must have given a clear, substantive answer to this objective."
+            )
+            # Build expert-only transcript for evaluation
+            expert_lines = [
+                line.strip()[len("[EXPERT]:"):].strip()
+                for line in current_transcript.split("\n")
+                if line.strip().startswith("[EXPERT]:")
+            ]
+            expert_transcript_str = "\n\n".join(expert_lines[-8:])  # last 8 expert turns
+
+            try:
+                sat_res = self.llm_fast.invoke(OBJECTIVE_SATISFACTION_PROMPT.format(
+                    current_objective=current_objective_label,
+                    objective_requirements=obj_requirements,
+                    expert_transcript=expert_transcript_str
+                ))
+                sat_cl = sat_res.content.strip()
+                if "```json" in sat_cl:
+                    sat_cl = sat_cl.split("```json")[1].split("```")[0].strip()
+                sat_cl = re.sub(r',\s*([}\]])', r'\1', sat_cl)
+                sat_data = json.loads(sat_cl)
+                satisfaction_verdict = sat_data.get("verdict", "NOT_EVALUATED")
+                satisfaction_missing = sat_data.get("missing_element") or "None"
+                sat_confidence = sat_data.get("confidence", 0.0)
+                sat_story_mined = sat_data.get("story_fully_mined", False)
+
+                # Hard enforcement: if SATISFIED with high confidence, skip immediately
+                if satisfaction_verdict == "SATISFIED" and sat_confidence >= 0.80:
+                    logger.info(
+                        f"Satisfaction evaluator: '{current_objective_label}' SATISFIED "
+                        f"(confidence={sat_confidence}). Forcing skip."
+                    )
+                    self.supabase.table("interview_sessions").update(
+                        {"raw_transcript": new_transcript}
+                    ).eq("id", session_id).execute()
+                    return {
+                        "question": None,
+                        "decision": {
+                            "action": "next_script_question",
+                            "intent": "skip",
+                            "reasoning": f"Satisfaction evaluator: '{current_objective_label}' complete.",
+                            "objective_satisfied": current_objective_label
+                        }
+                    }
+            except Exception as e:
+                logger.warning(f"Satisfaction evaluator failed, proceeding to main prompt: {e}")
+
+        # Build satisfaction context string for injection into prompt
+        if satisfaction_verdict == "SATISFIED":
+            satisfaction_context = (
+                f"SATISFACTION VERDICT: OBJECTIVE '{current_objective_label}' IS COMPLETE.\n"
+                f"FORBIDDEN: Do NOT ask any more questions about this objective or this story.\n"
+                f"ACTION: Generate a question for the NEXT missing objective."
+            )
+        elif satisfaction_verdict == "NEEDS_MORE" and satisfaction_missing and satisfaction_missing != "None":
+            satisfaction_context = (
+                f"SATISFACTION VERDICT: OBJECTIVE '{current_objective_label}' HAS ONE GAP.\n"
+                f"ONLY MISSING: {satisfaction_missing}\n"
+                f"Generate ONE question that fills exactly this gap. Do not ask for anything else."
+            )
+        else:
+            satisfaction_context = "(Satisfaction evaluator not run — proceed with objective compass.)"
+        # ─────────────────────────────────────────────────────────────────────
+
+        # 4. Build prompt kwargs (used by both first attempt and retry)
+        prompt_kwargs = dict(
             active_block=active_block,
             active_script_question=current_script_question,
+            live_scratchpad=live_scratchpad_str,
+            phase_objectives=phase_objectives_str,
+            satisfaction_verdict=satisfaction_context,
+            retrieved_context=retrieved_context,
             conversation_history=conversation_history,
             expert_answer=expert_answer,
             archetype_rules=get_archetype_rules(archetype),
             pacing_warning=pacing_warning
-        ))
-        
-        copilot_data = {"intent": "substantive", "follow_up": None}
-        try:
-            cl = copilot_res.content.strip()
-            if "```json" in cl: cl = cl.split("```json")[1].split("```")[0].strip()
-            copilot_data = json.loads(cl)
-        except Exception:
-            logger.warning("Failed to parse copilot response, defaulting to substantive.")
+        )
+
+        # ── FIX 1.2 — Safe JSON parse with retry ─────────────────────────────
+        # Default is "skip" (safe) — not "substantive" which would silently advance
+        copilot_data = {"intent": "skip", "follow_up": None}
+        copilot_res = self.llm.invoke(LIVE_COPILOT_PROMPT.format(**prompt_kwargs))
+        for attempt in range(2):
+            try:
+                raw = copilot_res.content.strip() if attempt == 0 else \
+                    self.llm.invoke(LIVE_COPILOT_PROMPT.format(**prompt_kwargs)).content.strip()
+                if "```json" in raw:
+                    raw = raw.split("```json")[1].split("```")[0].strip()
+                # Strip trailing commas that GPT occasionally emits
+                raw = re.sub(r',\s*([}\]])', r'\1', raw)
+                copilot_data = json.loads(raw)
+                break
+            except Exception as e:
+                if attempt == 1:
+                    logger.error(f"Copilot JSON failed after retry, defaulting to skip: {e}")
+        # ─────────────────────────────────────────────────────────────────────
             
         action = "follow_tangent"
         next_question = copilot_data.get("follow_up")
@@ -229,6 +414,329 @@ class InterviewDomain(BaseDomain):
         # Take the last N turns
         recent = turns[-max_turns:] if len(turns) > max_turns else turns
         return "\n\n".join(recent) if recent else "(No conversation history yet)"
+
+    def _compute_server_tangent_count(self, transcript: str, client_count: int = 0) -> int:
+        """
+        FIX 1.3 — Count consecutive AI follow-ups since the last [SCRIPT] boundary.
+
+        BUG FIXED: the previous version broke on [EXPERT]: lines, which appear
+        between every AI question. This reset the counter to 1 on every turn.
+        Now ONLY [SCRIPT]: boundaries reset the count.
+
+        Falls back to client_count if no [SCRIPT]: boundary has ever been stamped
+        (i.e., early in the session before the first script advance).
+        """
+        if not transcript:
+            return client_count  # Trust frontend before first boundary exists
+
+        lines = [l.strip() for l in transcript.split("\n") if l.strip()]
+        found_boundary = False
+        count = 0
+
+        for line in reversed(lines):
+            if line.startswith("[AI JOURNALIST]:"):
+                count += 1
+            elif line.startswith("[SCRIPT]:"):
+                # Only SCRIPT markers are real reset boundaries
+                found_boundary = True
+                break
+            # [EXPERT]: is NOT a boundary — skip it and keep counting
+
+        if not found_boundary:
+            # No [SCRIPT]: stamps yet — use max of server/client as safety net
+            return max(count, client_count)
+
+        return count
+
+    def _validate_and_persist_block(self, session: dict, session_id: str, requested_block: str) -> str:
+        """
+        FIX 2.3 — Validates block transitions and persists current_block server-side.
+        Prevents the frontend from skipping blocks or sending invalid block strings.
+        Allows same block or one step forward only.
+        """
+        current_block = session.get("current_block") or "Block 1"
+
+        def extract_num(s: str) -> int:
+            m = re.search(r'Block\s*(\d+)', s)
+            return int(m.group(1)) if m else 1
+
+        requested_num = extract_num(requested_block)
+        current_num = extract_num(current_block)
+
+        # Reject skips (e.g., Block 1 → Block 3)
+        if requested_num > current_num + 1:
+            logger.warning(
+                f"Block skip rejected: '{current_block}' → '{requested_block}'. "
+                f"Holding at '{current_block}'."
+            )
+            return current_block
+
+        # Reject completely invalid block strings
+        if requested_num < 1 or requested_num > 5:
+            logger.warning(f"Invalid block number '{requested_block}', holding at '{current_block}'.")
+            return current_block
+
+        # Persist if changed
+        if requested_num != current_num:
+            try:
+                self.supabase.table("interview_sessions").update(
+                    {"current_block": requested_block}
+                ).eq("id", session_id).execute()
+            except Exception as e:
+                logger.warning(f"Could not persist current_block (column may not exist yet): {e}")
+
+        return requested_block
+
+    def _compute_phase_objectives(self, active_block: str, transcript: str) -> Tuple[str, List[str]]:
+        """
+        FIX 2.2 — Computes a structured objective map for the current block.
+
+        Returns:
+            Tuple of (formatted_string_for_prompt, list_of_missing_objective_labels)
+
+        Uses multi-word signal phrases only (not single words like 'if', 'first')
+        and scans ONLY expert speech to prevent false positives from AI questions.
+        """
+
+        # ── Per-block objectives — hybrid signals (2-3 word, natural speech) ──
+        # IMPORTANT: These must match how experts ACTUALLY speak, not formal phrases.
+        # Each objective gets 8+ variants to prevent false-negative (objective never completing).
+        BLOCK_OBJECTIVES: Dict[str, List[Dict]] = {
+            "Block 1": [
+                {"id": "B1-O1", "label": "Origin Story",
+                 "signals": [
+                     "got into", "how i got", "why i", "career began", "started out",
+                     "my first job", "began my", "i started", "i got into", "fell into",
+                     "came from", "background is", "worked in", "used to be"
+                 ]},
+                {"id": "B1-O2", "label": "First Defining Experience",
+                 "signals": [
+                     "first time", "early on", "very early", "when i was", "starting out",
+                     "fresh out", "in the beginning", "back then", "years ago",
+                     "one of my first", "that early", "when i started"
+                 ]},
+                {"id": "B1-O3", "label": "Self-Description / Persona",
+                 "signals": [
+                     "i tend to", "my approach", "i think of", "i see myself",
+                     "i'm very", "i am someone", "i would say i", "i care about",
+                     "i value", "i focus on", "my style", "i like to", "i prefer",
+                     "i believe in", "for me it", "i'm someone"
+                 ]},
+                {"id": "B1-O4", "label": "Why They Teach / Share",
+                 "signals": [
+                     "teach", "share", "help others", "give back", "wanted to",
+                     "decided to", "started creating", "that's why i", "i write",
+                     "i create", "i made this", "i wanted people", "i believe in sharing"
+                 ]},
+            ],
+            "Block 2": [
+                {"id": "B2-O1", "label": "Major Challenges",
+                 "signals": [
+                     "hardest", "toughest", "biggest challenge", "struggled", "difficult",
+                     "really hard", "wasn't easy", "challenging", "it was tough",
+                     "took me a while", "the problem was", "not easy"
+                 ]},
+                {"id": "B2-O2", "label": "Failures",
+                 "signals": [
+                     "failed", "mistake", "went wrong", "blew up", "disaster",
+                     "regret", "should have", "i messed", "that was bad",
+                     "we lost", "it broke", "embarrassing", "cost us", "burned"
+                 ]},
+                {"id": "B2-O3", "label": "Belief Changes",
+                 "signals": [
+                     "changed my mind", "realized", "turning point", "pivoted",
+                     "shifted", "rethought", "now i think", "used to think",
+                     "changed how", "moment i", "that's when", "i no longer",
+                     "i stopped", "i started thinking", "assumption", "unlearn"
+                 ]},
+                {"id": "B2-O4", "label": "Decision Frameworks",
+                 "signals": [
+                     "how i decide", "framework", "mental model", "approach to",
+                     "strategy", "process for", "way i think about", "evaluate",
+                     "criteria", "weigh the", "trade-offs", "structured approach"
+                 ]},
+                {"id": "B2-O5", "label": "Pattern Recognition",
+                 "signals": [
+                     "warning signs", "red flags", "notice today", "looking back",
+                     "missed early", "recognize", "pattern", "signs that",
+                     "usually means", "tends to be", "predict"
+                 ]},
+                {"id": "B2-O6", "label": "Mentors & Influences",
+                 "signals": [
+                     "mentor", "manager", "senior engineer", "taught me",
+                     "learned from", "someone who", "influenced me", "guided",
+                     "gave me advice", "told me"
+                 ]},
+            ],
+            "Block 3": [
+                {"id": "B3-O1", "label": "Core Modules Identified",
+                 "signals": [
+                     "module", "section", "part", "chapter", "pillar",
+                     "unit", "area", "topic", "cover", "break it", "split it",
+                     "organized into", "structure it", "would include"
+                 ]},
+                {"id": "B3-O2", "label": "Topic Ordering / Sequence",
+                 "signals": [
+                     "start with", "then", "after that", "before", "sequence",
+                     "order", "prerequisite", "first you", "next is", "second",
+                     "comes after", "build on", "foundational"
+                 ]},
+                {"id": "B3-O3", "label": "Topic Dependencies",
+                 "signals": [
+                     "depends on", "need to know", "prerequisite", "can't do without",
+                     "foundation", "required", "before you can", "without knowing",
+                     "need first", "based on understanding"
+                 ]},
+                {"id": "B3-O4", "label": "What Gets Skipped (gaps)",
+                 "signals": [
+                     "skip", "often miss", "usually left out", "rarely covered",
+                     "missing", "gap", "most courses", "people forget",
+                     "not taught", "underrated", "overlooked", "ignored"
+                 ]},
+            ],
+            "Block 4": [
+                {"id": "B4-O1", "label": "At Least One Module Fully Extracted",
+                 "signals": [
+                     "the concept", "how it works", "edge case", "mistake", "heuristic",
+                     "evaluation", "break it down", "let me explain", "the idea is",
+                     "what happens", "the issue is", "fundamentally"
+                 ]},
+                {"id": "B4-O2", "label": "Reference Resources Mentioned",
+                 "signals": [
+                     "book", "course", "video", "resource", "recommend",
+                     "read", "watch", "reference", "article", "talk",
+                     "documentation", "repo", "blog post", "paper"
+                 ]},
+                {"id": "B4-O3", "label": "At Least One Expert Heuristic Extracted",
+                 "signals": [
+                     "rule of thumb", "whenever i", "always check", "pattern i",
+                     "i never", "my rule", "good heuristic", "i always",
+                     "the pattern", "sign that", "red flag", "indicator"
+                 ]},
+                {"id": "B4-O4", "label": "Common Mistakes Covered",
+                 "signals": [
+                     "beginners", "most people", "common mistake", "they usually",
+                     "everyone assumes", "people forget", "wrong way",
+                     "misunderstand", "novices", "junior devs", "often wrong"
+                 ]},
+            ],
+            "Block 5": [
+                {"id": "B5-O1", "label": "Overarching Mental Model",
+                 "signals": [
+                     "mental model", "framework", "philosophy", "way i think",
+                     "how i approach", "lens", "perspective", "mindset",
+                     "fundamentally", "at the core", "underlying"
+                 ]},
+                {"id": "B5-O2", "label": "Advice to Beginners",
+                 "signals": [
+                     "advice", "tell beginners", "if i could go back", "starting out",
+                     "to someone new", "for newcomers", "to someone just",
+                     "what i wish", "don't make", "i'd tell"
+                 ]},
+                {"id": "B5-O3", "label": "Contrarian Belief",
+                 "signals": [
+                     "most people think", "contrary", "unpopular", "actually",
+                     "disagree", "not what people", "people are wrong", "overrated",
+                     "underrated", "opposite of", "i push back"
+                 ]},
+            ]
+        }
+
+        # Determine which block map to use
+        block_key = "Block 1"
+        for k in BLOCK_OBJECTIVES:
+            if k in active_block:
+                block_key = k
+                break
+
+        objectives = BLOCK_OBJECTIVES.get(block_key, [])
+        if not objectives:
+            return "(No phase objectives defined for this block.)", []
+
+        # FIX 2.2 — Extract ONLY expert speech to prevent AI question text
+        # from triggering false-positive objective completion signals
+        expert_lines = []
+        for line in (transcript or "").split("\n"):
+            line = line.strip()
+            if line.startswith("[EXPERT]:"):
+                expert_lines.append(line[len("[EXPERT]:"):].strip().lower())
+        expert_text = " ".join(expert_lines)
+
+        result_lines = [f"PHASE OBJECTIVE MAP — {active_block}"]
+        result_lines.append(
+            "This map shows which interview objectives for the current block are COMPLETE vs MISSING.\n"
+            "You MUST use this map as your compass. Your next question MUST target the highest-priority MISSING objective.\n"
+            "Do NOT follow technical details from the last answer unless they directly help complete a MISSING objective.\n"
+        )
+
+        complete_count = 0
+        missing_objectives: List[str] = []
+
+        for obj in objectives:
+            satisfied = any(signal in expert_text for signal in obj["signals"])
+            status = "✓ COMPLETE" if satisfied else "✗ MISSING"
+            if satisfied:
+                complete_count += 1
+            else:
+                missing_objectives.append(obj["label"])
+            result_lines.append(f"  [{obj['id']}] {obj['label']} — {status}")
+
+        result_lines.append("")
+        if missing_objectives:
+            result_lines.append(
+                f"ACTION REQUIRED: {len(missing_objectives)} objective(s) are still MISSING.\n"
+                f"Your next question MUST target one of: {', '.join(missing_objectives[:3])}.\n"
+                f"IGNORE the last answer's technical details. Generate a question for a MISSING objective."
+            )
+        else:
+            result_lines.append(
+                "ALL OBJECTIVES COMPLETE for this block. "
+                "Return intent='skip' to allow the system to advance to the next block."
+            )
+
+        return "\n".join(result_lines), missing_objectives
+
+    async def background_embed_turn(self, session_id: str, expert_answer: str, embeddings_model: Any):
+        """Phase 2: Extract semantic essence from the latest turn and store in vector memory."""
+        try:
+            # Check if answer has substance
+            res = self.llm.invoke(BACKGROUND_EMBED_FILTER_PROMPT.format(expert_answer=expert_answer))
+            essence = res.content.strip()
+            
+            if essence.upper() == "SKIP" or not essence:
+                logger.info("Background embedding skipped - conversational filler detected.")
+                return
+                
+            # It has substance, get the session to find the live_transcript_source_id
+            session_res = self.supabase.table("interview_sessions").select("live_transcript_source_id").eq("id", session_id).execute()
+            if not session_res.data:
+                return
+            source_id = session_res.data[0].get("live_transcript_source_id")
+            if not source_id:
+                logger.warning(f"No knowledge source attached to session {session_id} for embedding.")
+                return
+                
+            # Embed the essence
+            emb = embeddings_model.embed_query(essence)
+            
+            # Save to knowledge_chunks
+            self.supabase.table("knowledge_chunks").insert({
+                "source_id": source_id,
+                "content": essence,
+                "embedding": emb,
+                "location_marker": f"Session {session_id} extract"
+            }).execute()
+            logger.info(f"Background embedding complete for session {session_id}")
+        except Exception as e:
+            logger.error(f"Error in background_embed_turn: {e}")
+
+    async def background_update_scratchpad(self, session_id: str):
+        """
+        DEPRECATED — scratchpad is now updated synchronously inside live_turn()
+        using llm_fast before the prompt is built. This method is kept as a
+        no-op so any lingering background_tasks.add_task() calls don't crash.
+        """
+        logger.debug(f"background_update_scratchpad called for {session_id} — no-op (now sync)")
 
     async def synthesize(self, session_id: str) -> Dict[str, Any]:
         session_res = self.supabase.table("interview_sessions").select("*").eq("id", session_id).execute()
