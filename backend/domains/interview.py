@@ -205,6 +205,7 @@ class InterviewDomain(BaseDomain):
             sp_cl = sp_res.content.strip()
             if "```json" in sp_cl:
                 sp_cl = sp_cl.split("```json")[1].split("```")[0].strip()
+            sp_cl = re.sub(r',\s*([}\]])', r'\1', sp_cl)
             updated_scratchpad = json.loads(sp_cl)
             # Persist immediately — next turn reads a fresh scratchpad
             self.supabase.table("interview_sessions").update(
@@ -217,9 +218,12 @@ class InterviewDomain(BaseDomain):
 
         # ── Phase Objective Map ───────────────────────────────────────────────
         script = session.get("script") or {}
+        # FIX: Pass the newly synced scratchpad, not the stale one from the start of the turn
+        final_scratchpad = locals().get("updated_scratchpad", current_scratchpad)
         phase_objectives_str, missing_objectives = self._compute_phase_objectives(
             active_block=active_block,
-            transcript=current_transcript
+            transcript=current_transcript,
+            current_scratchpad=final_scratchpad
         )
         # ─────────────────────────────────────────────────────────────────────
 
@@ -294,24 +298,38 @@ class InterviewDomain(BaseDomain):
                 sat_confidence = sat_data.get("confidence", 0.0)
                 sat_story_mined = sat_data.get("story_fully_mined", False)
 
-                # Hard enforcement: if SATISFIED with high confidence, skip immediately
-                if satisfaction_verdict == "SATISFIED" and sat_confidence >= 0.80:
+                # Hard enforcement: if SATISFIED, ALWAYS persist to memory to avoid the Confidence Trap
+                if satisfaction_verdict == "SATISFIED":
                     logger.info(
                         f"Satisfaction evaluator: '{current_objective_label}' SATISFIED "
-                        f"(confidence={sat_confidence}). Forcing skip."
+                        f"(confidence={sat_confidence}). Persisting to memory."
                     )
+                    
+                    # Persist the satisfaction state to the scratchpad so we NEVER ask about it again
+                    sat_list = updated_scratchpad.get("satisfied_objectives", [])
+                    if current_objective_label not in sat_list:
+                        sat_list.append(current_objective_label)
+                    updated_scratchpad["satisfied_objectives"] = sat_list
                     self.supabase.table("interview_sessions").update(
-                        {"raw_transcript": new_transcript}
+                        {"live_scratchpad": updated_scratchpad}
                     ).eq("id", session_id).execute()
-                    return {
-                        "question": None,
-                        "decision": {
-                            "action": "next_script_question",
-                            "intent": "skip",
-                            "reasoning": f"Satisfaction evaluator: '{current_objective_label}' complete.",
-                            "objective_satisfied": current_objective_label
+
+                    # ONLY force skip if confidence is high AND it was the absolute last objective left in this block
+                    if sat_confidence >= 0.80 and len(missing_objectives) <= 1:
+                        logger.info("All objectives satisfied with high confidence! Forcing skip to next block.")
+                        self.supabase.table("interview_sessions").update(
+                            {"raw_transcript": new_transcript}
+                        ).eq("id", session_id).execute()
+                        return {
+                            "question": None,
+                            "decision": {
+                                "action": "next_script_question",
+                                "intent": "skip",
+                                "reasoning": f"Satisfaction evaluator: '{current_objective_label}' complete.",
+                                "objective_satisfied": current_objective_label
+                            }
                         }
-                    }
+                    # Otherwise, we DO NOT RETURN here! We let it fall through to generate a question for the NEXT objective.
             except Exception as e:
                 logger.warning(f"Satisfaction evaluator failed, proceeding to main prompt: {e}")
 
@@ -332,6 +350,42 @@ class InterviewDomain(BaseDomain):
             satisfaction_context = "(Satisfaction evaluator not run — proceed with objective compass.)"
         # ─────────────────────────────────────────────────────────────────────
 
+        # ── THREAD SCORING ALGORITHM (WITH INFINITE LOOP PROTECTION) ─────────
+        highest_value_thread = "None (No open threads)"
+        current_sp = locals().get("updated_scratchpad", current_scratchpad)
+        open_threads = current_sp.get("open_threads", [])
+        asked_threads = current_sp.get("asked_threads", [])
+        
+        # Filter out threads we have already asked about
+        filtered_threads = [t for t in open_threads if t not in asked_threads]
+        
+        if isinstance(filtered_threads, list) and len(filtered_threads) > 0:
+            scoring_prompt = f"""\
+You are an interview strategist. 
+Score the following open threads from 1 to 10 based on their potential to reveal new heuristics, decisions, or failures.
+Prefer threads about specific incidents, failures, and decisions.
+Penalize threads about identity, philosophy, or general topics.
+Return ONLY the exact text of the highest scoring thread. Nothing else.
+
+THREADS:
+{json.dumps(filtered_threads, indent=2)}
+"""
+            try:
+                score_res = self.llm_fast.invoke(scoring_prompt)
+                highest_value_thread = score_res.content.strip()
+                
+                # Save the highest scoring thread to asked_threads so we NEVER ask about it again
+                if highest_value_thread not in asked_threads:
+                    asked_threads.append(highest_value_thread)
+                    current_sp["asked_threads"] = asked_threads
+                    self.supabase.table("interview_sessions").update(
+                        {"live_scratchpad": current_sp}
+                    ).eq("id", session_id).execute()
+            except Exception as e:
+                logger.warning(f"Thread scoring failed: {e}")
+                highest_value_thread = filtered_threads[-1] if filtered_threads else "None"
+        # ─────────────────────────────────────────────────────────────────────
+
         # 4. Build prompt kwargs (used by both first attempt and retry)
         prompt_kwargs = dict(
             active_block=active_block,
@@ -343,7 +397,8 @@ class InterviewDomain(BaseDomain):
             conversation_history=conversation_history,
             expert_answer=expert_answer,
             archetype_rules=get_archetype_rules(archetype),
-            pacing_warning=pacing_warning
+            pacing_warning=pacing_warning,
+            target_thread=highest_value_thread
         )
 
         # ── FIX 1.2 — Safe JSON parse with retry ─────────────────────────────
@@ -463,10 +518,10 @@ class InterviewDomain(BaseDomain):
         requested_num = extract_num(requested_block)
         current_num = extract_num(current_block)
 
-        # Reject skips (e.g., Block 1 → Block 3)
-        if requested_num > current_num + 1:
+        # Allow skips during testing, but reject going backward or invalid
+        if requested_num < current_num:
             logger.warning(
-                f"Block skip rejected: '{current_block}' → '{requested_block}'. "
+                f"Backward block movement rejected: '{current_block}' → '{requested_block}'. "
                 f"Holding at '{current_block}'."
             )
             return current_block
@@ -487,7 +542,7 @@ class InterviewDomain(BaseDomain):
 
         return requested_block
 
-    def _compute_phase_objectives(self, active_block: str, transcript: str) -> Tuple[str, List[str]]:
+    def _compute_phase_objectives(self, active_block: str, transcript: str, current_scratchpad: dict = None) -> Tuple[str, List[str]]:
         """
         FIX 2.2 — Computes a structured objective map for the current block.
 
@@ -522,11 +577,11 @@ class InterviewDomain(BaseDomain):
                      "i value", "i focus on", "my style", "i like to", "i prefer",
                      "i believe in", "for me it", "i'm someone"
                  ]},
-                {"id": "B1-O4", "label": "Why They Teach / Share",
+                {"id": "B1-O4", "label": "Initial Learning Challenges",
                  "signals": [
-                     "teach", "share", "help others", "give back", "wanted to",
-                     "decided to", "started creating", "that's why i", "i write",
-                     "i create", "i made this", "i wanted people", "i believe in sharing"
+                     "hardest part", "struggled with", "learning curve", "took me a while",
+                     "confusing", "didn't understand", "frustrating", "challenge when learning",
+                     "when i was learning", "trying to figure out", "stuck on"
                  ]},
             ],
             "Block 2": [
@@ -561,63 +616,24 @@ class InterviewDomain(BaseDomain):
                      "missed early", "recognize", "pattern", "signs that",
                      "usually means", "tends to be", "predict"
                  ]},
-                {"id": "B2-O6", "label": "Mentors & Influences",
+                {"id": "B2-O6", "label": "Learning Process",
                  "signals": [
-                     "mentor", "manager", "senior engineer", "taught me",
-                     "learned from", "someone who", "influenced me", "guided",
-                     "gave me advice", "told me"
+                     "how i learned", "resource", "documentation", "studied",
+                     "tutorial", "course", "reading about", "practicing",
+                     "building projects", "hands-on"
                  ]},
             ],
             "Block 3": [
-                {"id": "B3-O1", "label": "Core Modules Identified",
+                {"id": "B3-O1", "label": "Module Overview",
                  "signals": [
                      "module", "section", "part", "chapter", "pillar",
-                     "unit", "area", "topic", "cover", "break it", "split it",
-                     "organized into", "structure it", "would include"
+                     "unit", "area", "cover", "break it", "split it",
+                     "organized into", "structure it", "would include", "focus of this"
                  ]},
-                {"id": "B3-O2", "label": "Topic Ordering / Sequence",
+                {"id": "B3-O2", "label": "Specific Topics Identified",
                  "signals": [
-                     "start with", "then", "after that", "before", "sequence",
-                     "order", "prerequisite", "first you", "next is", "second",
-                     "comes after", "build on", "foundational"
-                 ]},
-                {"id": "B3-O3", "label": "Topic Dependencies",
-                 "signals": [
-                     "depends on", "need to know", "prerequisite", "can't do without",
-                     "foundation", "required", "before you can", "without knowing",
-                     "need first", "based on understanding"
-                 ]},
-                {"id": "B3-O4", "label": "What Gets Skipped (gaps)",
-                 "signals": [
-                     "skip", "often miss", "usually left out", "rarely covered",
-                     "missing", "gap", "most courses", "people forget",
-                     "not taught", "underrated", "overlooked", "ignored"
-                 ]},
-            ],
-            "Block 4": [
-                {"id": "B4-O1", "label": "At Least One Module Fully Extracted",
-                 "signals": [
-                     "the concept", "how it works", "edge case", "mistake", "heuristic",
-                     "evaluation", "break it down", "let me explain", "the idea is",
-                     "what happens", "the issue is", "fundamentally"
-                 ]},
-                {"id": "B4-O2", "label": "Reference Resources Mentioned",
-                 "signals": [
-                     "book", "course", "video", "resource", "recommend",
-                     "read", "watch", "reference", "article", "talk",
-                     "documentation", "repo", "blog post", "paper"
-                 ]},
-                {"id": "B4-O3", "label": "At Least One Expert Heuristic Extracted",
-                 "signals": [
-                     "rule of thumb", "whenever i", "always check", "pattern i",
-                     "i never", "my rule", "good heuristic", "i always",
-                     "the pattern", "sign that", "red flag", "indicator"
-                 ]},
-                {"id": "B4-O4", "label": "Common Mistakes Covered",
-                 "signals": [
-                     "beginners", "most people", "common mistake", "they usually",
-                     "everyone assumes", "people forget", "wrong way",
-                     "misunderstand", "novices", "junior devs", "often wrong"
+                     "first topic", "next topic", "then we cover", "concept of",
+                     "we dive into", "specifics of", "topics include", "we will talk about"
                  ]},
             ],
             "Block 5": [
@@ -644,10 +660,68 @@ class InterviewDomain(BaseDomain):
 
         # Determine which block map to use
         block_key = "Block 1"
-        for k in BLOCK_OBJECTIVES:
+        for k in ["Block 1", "Block 2", "Block 3", "Block 4", "Block 5"]:
             if k in active_block:
                 block_key = k
                 break
+
+        # ── BLOCK 4 DYNAMIC NODE CHECKLIST ─────────────────────────────
+        # If Block 4, ignore the text signals and build the objective map
+        # dynamically from the scratchpad's node_checklist for the current topic.
+        if block_key == "Block 4":
+            current_scratchpad = current_scratchpad or {}
+            checklist = current_scratchpad.get("node_checklist", {})
+            current_topic = current_scratchpad.get("current_topic", "General Topic")
+
+            # Default slots if nothing is in scratchpad yet
+            slots = {
+                "concept": False, "breakdown": False, "action_items": False,
+                "reference_guides": False, "edge_cases": False,
+                "constraints": False, "evaluation_path": False
+            }
+
+            if checklist:
+                # Grab the topic checklist if it exists, or the first one available
+                topic_data = checklist.get(current_topic)
+                if not topic_data and len(checklist) > 0:
+                    topic_data = list(checklist.values())[0]
+                if topic_data:
+                    slots.update(topic_data)
+
+            formatted_lines = [f"PHASE OBJECTIVE MAP — Block 4 (Node Extraction)"]
+            formatted_lines.append(f"CURRENT TOPIC: {current_topic}")
+            formatted_lines.append(
+                "You are extracting deep knowledge nodes for this specific topic.\n"
+                "Your next question MUST target the FIRST MISSING [✗] slot.\n"
+                "Do NOT ask about anything else."
+            )
+            
+            missing_labels = []
+            slot_labels = {
+                "concept": "Concept",
+                "breakdown": "Breakdown",
+                "action_items": "Action Items",
+                "reference_guides": "Reference Guides",
+                "edge_cases": "Edge Cases",
+                "constraints": "Constraints",
+                "evaluation_path": "Evaluation Path"
+            }
+
+            for slot_key, label in slot_labels.items():
+                is_complete = slots.get(slot_key, False)
+                if is_complete:
+                    formatted_lines.append(f"✓ COMPLETE: {label}")
+                else:
+                    formatted_lines.append(f"✗ MISSING: {label}")
+                    missing_labels.append(label)
+
+            if not missing_labels:
+                formatted_lines.append("\nSTATUS: ALL SLOTS COMPLETE. RETURN INTENT='skip'.")
+            else:
+                formatted_lines.append("\nSTATUS: ACTION REQUIRED. Target the FIRST [✗] slot.")
+
+            return "\n".join(formatted_lines), missing_labels
+        # ───────────────────────────────────────────────────────────────
 
         objectives = BLOCK_OBJECTIVES.get(block_key, [])
         if not objectives:
@@ -674,6 +748,20 @@ class InterviewDomain(BaseDomain):
 
         for obj in objectives:
             satisfied = any(signal in expert_text for signal in obj["signals"])
+            
+            # Persistent memory check: if the LLM evaluator marked this complete previously, it STAYS complete.
+            sat_list = (current_scratchpad or {}).get("satisfied_objectives", [])
+            if obj["label"] in sat_list:
+                satisfied = True
+            
+            # FIX: Automatic fulfillment based on Brain B's scratchpad state
+            # If we are looking for Specific Topics, and Brain B has already populated
+            # the node_checklist with at least one topic, force this to TRUE so we don't get stuck.
+            if obj["label"] == "Specific Topics Identified":
+                checklist = (current_scratchpad or {}).get("node_checklist", {})
+                if checklist and len(checklist) > 0:
+                    satisfied = True
+
             status = "✓ COMPLETE" if satisfied else "✗ MISSING"
             if satisfied:
                 complete_count += 1

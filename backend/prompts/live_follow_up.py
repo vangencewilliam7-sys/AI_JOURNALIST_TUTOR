@@ -42,6 +42,10 @@ You are currently executing: {active_block}
 {conversation_history}
 </conversation_history>
 
+<target_thread>
+{target_thread}
+</target_thread>
+
 <experts_latest_response>
 "{expert_answer}"
 </experts_latest_response>
@@ -117,6 +121,15 @@ FORBIDDEN QUESTION PATTERNS (always rejected, block all blocks):
   ✗ "Can you describe that in more detail?"
   ✗ "Tell me more about that experience."
   ✗ Any question that asks for MORE of what was already given.
+  ✗ NEVER REPEAT a question. Check <conversation_history>. If you ask something semantically identical to a past question, you fail.
+
+HARD RULE ON BANNED WORDS:
+If you already know the expert's philosophy/identity, NEVER ask about: identity, philosophy, traits, values, persona, approach, mindset.
+Instead, use these words to target causal extraction: origin, evidence, failure, decision, tradeoff, outcome, heuristic, framework.
+Ask "What happened?" and "What evidence changed your mind?", NOT "What do you believe?".
+
+TARGET THREAD FOCUS:
+If `<target_thread>` is NOT "None", you MUST formulate your question to explicitly extract that specific incident, failure, or decision. Do not ask a generic question.
 
 ══════════════════════════════════════════════════════════════════════════
 GATE 1 — QUESTION TYPE CLASSIFIER
@@ -212,11 +225,16 @@ is not on the ALLOWED list for the current block.
 ┌─────────────────────────────────────────────────────────────────────┐
 │ BLOCK 3 (Module / Curriculum Mapping)                               │
 │  ALLOWED:   TYPE B — Curriculum-Mapping ONLY                        │
-│  FORBIDDEN: TYPE A — Experience-Centered                            │
-│  FORBIDDEN: TYPE C — Topic-Centered (deep-dive detail)              │
 │                                                                     │
-│  Rationale: Block 3 is purely structural. The goal is a topic map,  │
-│  not depth. No stories. No domain details. No concept extraction.   │
+│  BLOCK 3 FORBIDDEN TOPICS (MANDATORY):                              │
+│  Do NOT ask any of the following in Block 3:                        │
+│  - Deep technical details about a specific concept                  │
+│  - Edge cases, constraints, or common mistakes                      │
+│  - Personal stories or career turning points                        │
+│                                                                     │
+│  Rationale: Block 3 is strictly for mapping. The goal is to get a   │
+│  Module Overview and Identify Specific Topics. Once you have a list │
+│  of topics, the block is SATISFIED. Do NOT drill into the topics!   │
 │                                                                     │
 │  Edge cases:                                                        │
 │  • If the expert starts explaining a topic in depth (TYPE C mode),  │
@@ -230,29 +248,27 @@ is not on the ALLOWED list for the current block.
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
-│ BLOCK 4 and beyond (Node Extraction)                                │
-│  ALLOWED:   TYPE C — Topic-Centered ONLY (until all slots filled)   │
-│  SECONDARY: TYPE A — Experience-Centered ONLY after Concept,        │
-│             Breakdown, and Expert Story slots remain unfilled.       │
-│  FORBIDDEN: TYPE B — Curriculum Mapping                             │
+│ BLOCK 4 (Node Extraction Loop)                                      │
+│  ALLOWED:   TYPE C — Topic-Centered ONLY                            │
 │                                                                     │
-│  Rationale: Block 4+ extracts complete knowledge nodes. Domain      │
-│  accuracy and generalizable rules are the primary goal. Personal    │
-│  stories may be used to fill Expert Story or Expert Heuristic slots │
-│  only — never as the primary question mode.                         │
+│  BLOCK 4 FORBIDDEN TOPICS (MANDATORY):                              │
+│  Do NOT ask any of the following in Block 4:                        │
+│  - "What topics should we cover next?" (That was Block 3)           │
+│  - Personal stories or career turning points (That was Block 1/2)   │
+│                                                                     │
+│  Rationale: Block 4 is a strict loop. Your ONLY job is to fill the  │
+│  7 specific slots (Concept, Breakdown, Action Items, Reference      │
+│  Guides, Edge Cases, Constraints, Evaluation Path) for the CURRENT  │
+│  TOPIC. Ask ONLY about the first MISSING slot from the Phase Map.   │
 │                                                                     │
 │  Edge cases:                                                        │
-│  • You may ask a TYPE A question ONLY to fill "Expert Story" or     │
-│    "Expert Heuristic" slots. All other slots require TYPE C.        │
+│  • If all slots are complete for the current topic, return INTENT   │
+│    'skip'. The frontend script will handle topic advancement.       │
 │  • If the expert gives a generic textbook answer, escalate with a   │
 │    TYPE C edge-case question: "Where does this completely break     │
 │    down in practice?"                                               │
 │  • Never ask TYPE A to fill Concept, Breakdown, Edge Cases,         │
-│    Constraints, Action Items, Evaluation Path, or Common Mistakes   │
-│    — those require generalizable TYPE C answers.                    │
-│  • If the expert keeps giving personal anecdotes (TYPE A answers)   │
-│    when you need TYPE C answers, explicitly request the generalized │
-│    version: "So turning that into a rule — what would you say?"     │
+│    Constraints, Action Items, or Evaluation Path slots.             │
 └─────────────────────────────────────────────────────────────────────┘
 
 GATE 2 REJECTION PROTOCOL:

@@ -142,9 +142,13 @@ OBJECTIVE_REQUIREMENTS = {
         "1. A specific person (mentor, manager, etc.) who influenced them. "
         "2. A specific lesson or piece of advice they learned from them."
     ),
-    "Core Modules Identified": (
-        "1. A list of at least 3 named topics or modules in the course. "
-        "2. A general sense of what each covers."
+    "Module Overview": (
+        "1. A high-level explanation of what this module is about. "
+        "2. The core goal or thesis of this module."
+    ),
+    "Specific Topics Identified": (
+        "1. A clear list of specific topics that belong in this module. "
+        "2. At least a brief mention of what each topic covers."
     ),
     "Topic Ordering / Sequence": (
         "1. The order in which topics should be learned. "
@@ -199,7 +203,8 @@ CURRENT SCRATCHPAD:
 NEWEST TRANSCRIPT LINES:
 {new_transcript}
 
-Update the scratchpad using an APPEND-ONLY mindset for arrays. Do NOT delete or summarize away past `topics_covered` or old `interesting_threads` — simply append the new ones. Update `current_topic` to reflect the immediate conversation. Keep strings highly concise.
+Update the scratchpad using an APPEND-ONLY mindset for arrays. Do NOT delete past facts or old threads. 
+Extract conclusions AND causal experiences (incidents, decisions, outcomes).
 
 For `node_checklist`: track which of the 10 knowledge slots have been filled for the current topic.
 Mark a slot as true ONLY if the expert explicitly covered it in the transcript.
@@ -209,22 +214,22 @@ Return ONLY the updated JSON object. No prose.
 Schema:
 {{
   "current_topic": "What they are talking about right now",
-  "topics_covered": ["list", "of", "past", "topics"],
-  "interesting_threads": ["claims or stories to pull on later"],
-  "open_questions": ["questions we haven't answered yet"],
+  "new_facts": ["Concrete things they did, roles they held, tech they used"],
+  "new_decisions": ["Specific choices they made and the trade-offs"],
+  "new_failures": ["Specific incidents, mistakes, outages, or wrong assumptions"],
+  "new_heuristics": ["Rules of thumb or mental models derived from their experiences"],
+  "open_threads": ["Highly specific unresolved incidents or decisions to ask about later"],
   "expert_profile": {{"role": "...", "industry": "..."}},
+  "satisfied_objectives": ["array", "of", "strings", "DO NOT MODIFY OR DELETE EXISTING ONES"],
   "node_checklist": {{
     "<topic_name>": {{
-      "concept": true,
+      "concept": false,
       "breakdown": false,
-      "expert_story": false,
-      "expert_heuristic": false,
-      "common_mistakes": false,
+      "action_items": false,
+      "reference_guides": false,
       "edge_cases": false,
       "constraints": false,
-      "action_items": false,
-      "evaluation_path": false,
-      "reference_guides": false
+      "evaluation_path": false
     }}
   }}
 }}
