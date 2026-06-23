@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import { Mic, MicOff, Send, PauseCircle, Loader2, BrainCircuit, Eye, Target, Zap, FileText, ArrowRight } from 'lucide-react';
 
 interface Message {
@@ -22,6 +23,7 @@ interface Pointer {
 
 const InterviewPage: React.FC = () => {
   const navigate = useNavigate();
+  const { session } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -68,7 +70,7 @@ const InterviewPage: React.FC = () => {
     ]);
 
     // Fetch the script data for the sidebar
-    fetch(`http://localhost:9120/session/${sessionId}`)
+    fetch(`http://localhost:9120/session/${sessionId}`, { headers: { 'Authorization': `Bearer ${session?.access_token}` } })
       .then(res => res.json())
       .then(data => {
         if (data.status === 'success' && data.session?.script) {
@@ -143,7 +145,7 @@ const InterviewPage: React.FC = () => {
 
       const res = await fetch('http://localhost:9120/live-turn', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token}` },
         body: JSON.stringify({
           session_id: sessionId,
           expert_answer: text,
@@ -228,7 +230,7 @@ const InterviewPage: React.FC = () => {
     setIsSynthesizing(true);
     try {
       // Wait for synthesis + homework generation to fully complete before navigating
-      await fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST' });
+      await fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } });
       navigate('/homework');
     } catch (err) {
       console.error(err);
