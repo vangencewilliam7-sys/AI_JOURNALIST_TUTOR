@@ -393,8 +393,11 @@ const InterviewPage: React.FC = () => {
             <button className="btn-ghost" style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={handleNextBlock}>
               Next Block <ArrowRight size={14} style={{ marginLeft: '6px', verticalAlign: '-2px' }} />
             </button>
-            <button className="btn-ghost" style={{ borderColor: 'var(--red)', color: 'var(--red)' }} onClick={handleEndInterview} disabled={isSynthesizing}>
-              <PauseCircle size={14} style={{ marginRight: '6px', verticalAlign: '-2px' }} /> PAUSE INTERVIEW
+            <button className="btn-ghost" style={{ borderColor: 'var(--yellow)', color: 'var(--yellow)' }} onClick={handlePauseSession} disabled={isLoading}>
+              <PauseCircle size={14} style={{ marginRight: '6px', verticalAlign: '-2px' }} /> PAUSE SESSION
+            </button>
+            <button className="btn-ghost" style={{ borderColor: 'var(--red)', color: 'var(--red)' }} onClick={() => handleEndInterview()} disabled={isSynthesizing}>
+              <Target size={14} style={{ marginRight: '6px', verticalAlign: '-2px' }} /> FINISH INTERVIEW
             </button>
           </div>
         </header>
