@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
-  BrainCircuit, Database, ChevronRight, Sparkles, Cpu, Activity, BookOpen, Loader2, CloudDownload, User, Shield, LogOut
+  BrainCircuit, Database, ChevronRight, Sparkles, Cpu, Activity, BookOpen, Loader2, CloudDownload, User, LogOut
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
+import AutocompleteInput from '../components/AutocompleteInput';
 
 const LandingPage: React.FC = () => {
   const navigate = useNavigate();
@@ -19,6 +20,20 @@ const LandingPage: React.FC = () => {
     short_bio: '',
     target_audience: '',
   });
+  const [suggestions, setSuggestions] = useState<Record<string, (string | number)[]>>({
+    domain: [], target_audience: [], short_bio: [], years_of_experience: []
+  });
+
+  // Fetch autocomplete suggestions from server on mount
+  useEffect(() => {
+    if (!session?.access_token) return;
+    fetch('http://localhost:9120/field-suggestions', {
+      headers: { 'Authorization': `Bearer ${session.access_token}` }
+    })
+      .then(r => r.json())
+      .then(data => { if (data.suggestions) setSuggestions(data.suggestions); })
+      .catch(() => {});
+  }, [session]);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -86,17 +101,39 @@ const LandingPage: React.FC = () => {
                 
                 <div className="input-group">
                   <label>Current Title</label>
-                  <input required className="input-field" value={tutorProfile.current_title} onChange={e => setTutorProfile({...tutorProfile, current_title: e.target.value})} />
+                  <AutocompleteInput
+                    required
+                    className="input-field"
+                    value={tutorProfile.current_title}
+                    onChange={val => setTutorProfile({...tutorProfile, current_title: val})}
+                    suggestions={suggestions.domain || []}
+                    placeholder="e.g. Senior Backend Engineer"
+                  />
                 </div>
 
                 <div className="input-group">
                   <label>Years of Experience</label>
-                  <input required type="number" min="0" className="input-field" value={tutorProfile.years_of_experience || ''} onChange={e => setTutorProfile({...tutorProfile, years_of_experience: parseInt(e.target.value) || 0})} />
+                  <AutocompleteInput
+                    required
+                    type="number"
+                    className="input-field"
+                    value={tutorProfile.years_of_experience}
+                    onChange={val => setTutorProfile({...tutorProfile, years_of_experience: parseInt(val) || 0})}
+                    suggestions={suggestions.years_of_experience || []}
+                    placeholder="e.g. 8"
+                  />
                 </div>
 
                 <div className="input-group">
                   <label>Core Domain / Specialization</label>
-                  <input required className="input-field" value={tutorProfile.expertise_streams} onChange={e => setTutorProfile({...tutorProfile, expertise_streams: e.target.value})} />
+                  <AutocompleteInput
+                    required
+                    className="input-field"
+                    value={tutorProfile.expertise_streams}
+                    onChange={val => setTutorProfile({...tutorProfile, expertise_streams: val})}
+                    suggestions={suggestions.domain || []}
+                    placeholder="e.g. Distributed Systems, Cloud Architecture"
+                  />
                 </div>
               </div>
 
@@ -107,12 +144,28 @@ const LandingPage: React.FC = () => {
                 
                 <div className="input-group">
                   <label>Target Audience</label>
-                  <input required className="input-field" value={tutorProfile.target_audience} onChange={e => setTutorProfile({...tutorProfile, target_audience: e.target.value})} />
+                  <AutocompleteInput
+                    required
+                    className="input-field"
+                    value={tutorProfile.target_audience}
+                    onChange={val => setTutorProfile({...tutorProfile, target_audience: val})}
+                    suggestions={suggestions.target_audience || []}
+                    placeholder="e.g. Junior to Mid-Level Software Engineers"
+                  />
                 </div>
 
                 <div className="input-group">
                   <label>Expert Bio / Context</label>
-                  <textarea required className="input-field" style={{ minHeight: '120px' }} value={tutorProfile.short_bio} onChange={e => setTutorProfile({...tutorProfile, short_bio: e.target.value})} />
+                  <AutocompleteInput
+                    required
+                    isTextarea
+                    className="input-field"
+                    style={{ minHeight: '120px' }}
+                    value={tutorProfile.short_bio}
+                    onChange={val => setTutorProfile({...tutorProfile, short_bio: val})}
+                    suggestions={suggestions.short_bio || []}
+                    placeholder="Brief background about the expert..."
+                  />
                 </div>
 
               </div>
