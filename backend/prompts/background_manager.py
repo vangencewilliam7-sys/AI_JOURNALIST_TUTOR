@@ -200,6 +200,78 @@ OBJECTIVE_REQUIREMENTS = {
     ),
 }
 
+# ==========================================================================
+# PHASE 4 — COVERAGE ENGINE
+# ==========================================================================
+# Runs AFTER every expert answer in Block 4 (Topic Extraction).
+# Does NOT generate questions. Only scores evidence and signals completion.
+# Output is injected into `satisfaction_verdict` in the main copilot prompt.
+# ==========================================================================
+
+COVERAGE_ENGINE_PROMPT = """\
+You are a Knowledge Coverage Evaluator.
+
+You do NOT ask questions.
+You do NOT interview experts.
+You evaluate how much evidence has been collected for the CURRENT TOPIC.
+
+CURRENT TOPIC: {current_topic}
+
+EXTRACTED EVIDENCE (all expert answers for this topic so far):
+{expert_transcript}
+
+KNOWLEDGE FIELDS TO EVALUATE:
+* Concept           — Does the evidence clearly define what this topic is?
+* Action Items      — Does the evidence describe concrete steps or procedures?
+* Reference Guides  — Are specific books, tools, frameworks, or resources mentioned?
+* Edge Cases        — Are unusual, boundary, or failure scenarios described?
+* Constraints       — Are limits, prerequisites, or conditions that restrict use described?
+* Evaluation Path   — Is there guidance on how to assess mastery or correctness?
+* Common Mistakes   — Are specific errors practitioners make described?
+* Heuristics        — Are rules of thumb, mental models, or decision shortcuts present?
+
+SCORING (per field):
+  0.00 = No evidence
+  0.25 = Weak / implied evidence
+  0.50 = Partial evidence
+  0.75 = Strong but incomplete evidence
+  1.00 = Complete, sufficient evidence
+
+COMPLETION THRESHOLDS (minimum scores required):
+  Concept           >= 0.80
+  Action Items      >= 0.70
+  Edge Cases        >= 0.70
+  Constraints       >= 0.70
+  Evaluation Path   >= 0.70
+  Common Mistakes   >= 0.70
+  Heuristics        >= 0.70
+  Reference Guides  >= 0.50
+
+ANTI-LOOP RULE:
+Never recommend a follow-up that does not improve the weakest fields.
+Every recommended lens must close a measurable evidence gap.
+Never recommend "tell me more" or generic elaboration.
+
+Return ONLY this JSON, no other text:
+{{
+  "topic": "{current_topic}",
+  "status": "TOPIC_COMPLETE" | "TOPIC_INCOMPLETE",
+  "coverage": {{
+    "concept":          0.0,
+    "action_items":     0.0,
+    "reference_guides": 0.0,
+    "edge_cases":       0.0,
+    "constraints":      0.0,
+    "evaluation_path":  0.0,
+    "common_mistakes":  0.0,
+    "heuristics":       0.0
+  }},
+  "weakest_fields":     ["list of field names below threshold, sorted ascending by score"],
+  "recommended_lenses": ["Teaching Lens" | "Failure Lens" | "Decision Lens" | "Pattern Lens" | "Experience Lens"],
+  "missing_summary":    "One sentence naming the most critical gap, or null if complete"
+}}
+"""
+
 SCRATCHPAD_UPDATE_PROMPT = """\
 You are a background memory manager (Brain B).
 Your job is to update the JSON Working Memory (Scratchpad) based on the newest transcript lines.
@@ -230,14 +302,64 @@ Schema:
   "satisfied_objectives": ["array", "of", "strings", "DO NOT MODIFY OR DELETE EXISTING ONES"],
   "node_checklist": {{
     "<topic_name>": {{
-      "concept": false,
-      "breakdown": false,
-      "action_items": false,
-      "reference_guides": false,
-      "edge_cases": false,
-      "constraints": false,
-      "evaluation_path": false
+      "module": "Module name",
+      "prerequisites": ["List of prerequisite topics"],
+      "importance": "Foundational | Advanced",
+      "concept":          0.0,
+      "action_items":     0.0,
+      "reference_guides": 0.0,
+      "edge_cases":       0.0,
+      "constraints":      0.0,
+      "evaluation_path":  0.0,
+      "common_mistakes":  0.0,
+      "heuristics":       0.0,
+      "status": "NOT_STARTED" | "IN_PROGRESS" | "COMPLETE"
     }}
   }}
+}}
+"""
+
+# ==========================================================================
+# TOPIC CONTROLLER
+# ==========================================================================
+# ONLY active in Block 3 and Block 4. Runs before the main copilot prompt.
+# ==========================================================================
+
+TOPIC_CONTROLLER_PROMPT = """\
+ROLE
+
+You are a Topic Controller.
+
+Goal:
+Manage topic progression.
+
+Input:
+Current Module: {current_module}
+Current Topic: {current_topic}
+Topic List: {module_progress}
+Curriculum Map (Dependencies & Priorities): {curriculum_map}
+
+RULES
+
+Every topic has:
+NOT_STARTED
+IN_PROGRESS
+COMPLETE
+
+Select next topic using:
+1. Dependency order
+2. Priority order
+3. Coverage status
+
+Do not allow:
+* Topic jumping
+* Module jumping
+* Returning to completed topics
+
+Output ONLY this JSON:
+{{
+  "action": "STAY_IN_TOPIC" | "NEXT_TOPIC" | "NEXT_MODULE",
+  "current_topic": "The exact topic name to focus on next, or null if moving to next module",
+  "reasoning": "Explanation based on dependencies, priority, and coverage"
 }}
 """

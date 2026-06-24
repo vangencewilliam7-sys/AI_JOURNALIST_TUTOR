@@ -415,7 +415,31 @@ async def get_knowledge_report(current_expert_id: str = Depends(get_current_expe
        { persona, course (modules→topics→7 slots), tacit_insights, war_stories, mental_models }
     """
     try:
-        # Primary source: latest synthesized session for this expert
+        # Primary source: tacit_knowledge_reports
+        tk_res = (
+            supabase.table("tacit_knowledge_reports")
+            .select("*")
+            .eq("expert_id", current_expert_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if tk_res.data:
+            report = tk_res.data[0]
+            stn = report.get("structured_tacit_notes", {})
+            ko = {
+                "persona": report.get("persona_snapshot", {}),
+                "course": report.get("course_structure", {}),
+                "tacit_insights": stn.get("tacit_insights", []),
+                "war_stories": stn.get("war_stories", []),
+                "mental_models": stn.get("mental_models", []),
+                "pattern_breaks": stn.get("pattern_breaks", []),
+                "structured_tacit_notes": stn.get("tutor_notes", [])
+            }
+            return {"status": "success", "knowledge_output": ko}
+
+        # Fallback: latest synthesized session for this expert
         sess_res = (
             supabase.table("interview_sessions")
             .select("session_synthesis, status, iteration_number")
