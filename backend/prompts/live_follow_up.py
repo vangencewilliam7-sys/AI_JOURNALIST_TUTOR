@@ -76,6 +76,38 @@ IF objectives are MISSING:
   → Your question must target the first MISSING one. Do not follow the last answer's topic.
 
 ══════════════════════════════════════════════════════════════════════════
+STEP 0.3 — QUESTION REPETITION FIREWALL (HIGHEST PRIORITY — RUNS BEFORE ALL STEPS)
+══════════════════════════════════════════════════════════════════════════
+Before generating ANY question, scan the FULL `<conversation_history>` for questions already asked by the AI.
+
+A candidate question is FORBIDDEN if it is semantically equivalent to ANY prior question.
+Two questions are semantically equivalent if they:
+  - Ask about the SAME topic (e.g., "common mistakes", "challenges", "pattern recognition")
+  - Use the SAME framing (e.g., "what mistakes do...", "what challenges do...", "how do practitioners...")
+  - Are a rephrasing or variation of each other
+
+HARD EXAMPLES OF FORBIDDEN REPETITIONS:
+  ✗ Already asked: "What mistakes do practitioners make with pattern recognition?"
+    → BANNED: "What common mistakes do engineers make during incidents?"
+    → BANNED: "What are mistakes backend developers typically make?"
+    → BANNED: "What errors do practitioners commonly make when..."
+  ✗ Already asked: "What specific challenge did you face early in your career?"
+    → BANNED: "What was the biggest challenge you faced when learning backend?"
+    → BANNED: "Can you describe a significant obstacle you encountered?"
+
+IF a candidate question is forbidden by this rule:
+  → Set intent = "skip", follow_up = null. STOP. Do not attempt reformulation.
+  → Write in internal_reasoning: "REPETITION FIREWALL: This question was already asked in a different form."
+
+IMPORTANT — TYPE C SLOTS IN TYPE A BLOCKS:
+  Slots like "Common Mistakes", "Edge Cases", "Constraints", "Evaluation Path" require TYPE C questions.
+  In Block 1 or Block 2, TYPE C is FORBIDDEN.
+  Therefore these slots can NEVER be filled in Block 1/2.
+  → Do NOT attempt to ask TYPE C questions in Block 1/2 under ANY phrasing.
+  → If the highest-priority missing slot requires TYPE C and you are in Block 1/2, skip to the next slot.
+  → If NO valid slot remains for the current block type, return intent = "skip".
+
+══════════════════════════════════════════════════════════════════════════
 STEP 0.5 — EXTRACTION SATISFACTION GATE (HARD CONSTRAINT — NON-NEGOTIABLE)
 ══════════════════════════════════════════════════════════════════════════
 The `<extraction_satisfaction_verdict>` above contains a pre-computed verdict from the
@@ -122,6 +154,7 @@ FORBIDDEN QUESTION PATTERNS (always rejected, block all blocks):
   ✗ "Tell me more about that experience."
   ✗ Any question that asks for MORE of what was already given.
   ✗ NEVER REPEAT a question. Check <conversation_history>. If you ask something semantically identical to a past question, you fail.
+
 
 HARD RULE ON BANNED WORDS:
 If you already know the expert's philosophy/identity, NEVER ask about: identity, philosophy, traits, values, persona, approach, mindset.

@@ -176,7 +176,19 @@ class InterviewDomain(BaseDomain):
 
         # ── FIX 1.3 — Server-side tangent count (browser-crash-proof) ────────
         tangent_count = self._compute_server_tangent_count(current_transcript, client_count=client_tangent_count)
-        tangent_limit = 6 if "Block 4" in active_block else 2
+        # Per-block tangent limits: how many AI follow-ups are allowed per script question
+        _TANGENT_LIMITS = {
+            "Block 1": 3,  # Origin stories — personal, need a bit of depth
+            "Block 2": 4,  # Challenges & failures — rich stories, dig deeper
+            "Block 3": 2,  # Course structure — list-based, keep tight
+            "Block 4": 6,  # Deep topic extraction — intentionally deep
+            "Block 5": 2,  # Mental models & wrap-up — concise
+        }
+        tangent_limit = 2  # default fallback
+        for block_key, limit in _TANGENT_LIMITS.items():
+            if block_key in active_block:
+                tangent_limit = limit
+                break
         pacing_warning = ""
         if tangent_count >= tangent_limit:
             pacing_warning = (
@@ -581,7 +593,13 @@ THREADS:
                  "signals": [
                      "hardest part", "struggled with", "learning curve", "took me a while",
                      "confusing", "didn't understand", "frustrating", "challenge when learning",
-                     "when i was learning", "trying to figure out", "stuck on"
+                     "when i was learning", "trying to figure out", "stuck on",
+                     "setback", "mistake", "went wrong", "blew up", "tough",
+                     "didn't know", "had no idea", "figured out", "lesson learned",
+                     "the hard way", "that taught me", "it broke", "failure",
+                     "i failed", "cost us", "i messed", "embarrassing",
+                     "shaped my", "looking back", "back then", "early mistake",
+                     "took a while", "painful", "burned by", "bit me"
                  ]},
             ],
             "Block 2": [
@@ -886,44 +904,62 @@ THREADS:
             cl_tut = tut_res.content.strip()
             if "```json" in cl_tut: cl_tut = cl_tut.split("```json")[1].split("```")[0].strip()
             tutor_data = json.loads(cl_tut)
-            
-            # Extract persona specifics
-            update_ep["teaching_style"] = tutor_data.get("teaching_style", ep.get("teaching_style", ""))
-            update_ep["linguistic_fingerprint"] = tutor_data.get("linguistic_fingerprint", ep.get("linguistic_fingerprint", {}))
-            update_ep["system_prompt"] = tutor_data.get("system_prompt", ep.get("system_prompt", ""))
-            
-            # Upsert Curriculum Blueprints
+
+            # Extract persona specifics for expert_profile
+            persona = tutor_data.get("tutor_persona", {})
+            update_ep["teaching_style"] = persona.get("teaching_style", ep.get("teaching_style", ""))
+            update_ep["linguistic_fingerprint"] = persona.get("linguistic_fingerprint", ep.get("linguistic_fingerprint", {}))
+            update_ep["system_prompt"] = persona.get("system_prompt", ep.get("system_prompt", ""))
+
+            # Upsert Curriculum Blueprints (store raw modules blob for backward compat)
+            course_structure = tutor_data.get("course_structure", {})
+            modules = course_structure.get("modules", [])
             cb_res = self.supabase.table("curriculum_blueprints").select("*").eq("expert_id", expert["id"]).execute()
             if not cb_res.data:
                 self.supabase.table("curriculum_blueprints").insert({
                     "expert_id": expert["id"],
-                    "session_id": session_id,          # ← required NOT NULL column
-                    "course_modules": tutor_data.get("course_modules", [])
+                    "session_id": session_id,
+                    "course_modules": modules
                 }).execute()
             else:
                 cb = cb_res.data[0]
-                # Merge or append course_modules
                 existing_modules = cb.get("course_modules", [])
-                new_modules = tutor_data.get("course_modules", [])
-                # Simple append for now. In a real system, we'd merge by module title.
-                combined_modules = existing_modules + new_modules
+                merged_modules = existing_modules + modules
                 self.supabase.table("curriculum_blueprints").update({
-                    "course_modules": combined_modules,
-                    "session_id": session_id,          # ← keep it current
+                    "course_modules": merged_modules,
+                    "session_id": session_id,
                     "iteration_last_updated": session["iteration_number"]
                 }).eq("id", cb["id"]).execute()
-        
+
         # Save updated expert profile
         self.supabase.table("expert_profile").update(update_ep).eq("id", ep["id"]).execute()
-        
-        # Update session with synthesis result
-        session_synthesis = {"general": general_data, "tutor": tutor_data}
+
+        # ── Build the clean unified knowledge output ──────────────────────────
+        persona_out = tutor_data.get("tutor_persona", {}) if tutor_data else {}
+        course_out = tutor_data.get("course_structure", {}) if tutor_data else {}
+
+        knowledge_output = {
+            "persona": {
+                "system_prompt": persona_out.get("system_prompt", ""),
+                "teaching_style": persona_out.get("teaching_style", ""),
+                "linguistic_fingerprint": persona_out.get("linguistic_fingerprint", {})
+            },
+            "course": course_out,
+            "tacit_insights": general_data.get("tacit_insights", []),
+            "war_stories": general_data.get("war_stories", []),
+            "mental_models": general_data.get("mental_models", []),
+            "pattern_breaks": general_data.get("pattern_breaks", []),
+            "structured_tacit_notes": tutor_data.get("structured_tacit_notes", []) if tutor_data else []
+        }
+        # ─────────────────────────────────────────────────────────────────────
+
+        session_synthesis = {"general": general_data, "tutor": tutor_data, "knowledge_output": knowledge_output}
         self.supabase.table("interview_sessions").update({
             "status": "synthesized",
             "session_synthesis": session_synthesis
         }).eq("id", session_id).execute()
-        
-        return {"status": "success", "session_synthesis": session_synthesis}
+
+        return {"status": "success", "knowledge_output": knowledge_output}
 
     async def generate_homework(self, session_id: str) -> Dict[str, Any]:
         session_res = self.supabase.table("interview_sessions").select("*").eq("id", session_id).execute()

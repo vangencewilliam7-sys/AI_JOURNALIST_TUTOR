@@ -78,7 +78,7 @@ app.add_middleware(
 
 # Initialize AI components
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, timeout=300)
-llm_fast = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, max_tokens=30, timeout=30)
+llm_fast = ChatOpenAI(model="gpt-4o-mini", temperature=0.0, max_tokens=1500, timeout=60)
 embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
@@ -121,8 +121,10 @@ class HomeworkPutRequest(BaseModel):
 async def intake_endpoint(request: ExpertIntakeRequest, current_expert_id: str = Depends(get_current_expert_id)):
     """Phase 2: Save expert profile and generate Day 1 Icebreaker."""
     try:
-        # Update Expert (row already created by Auth Trigger)
-        expert_res = supabase.table("experts").update({
+        # Upsert Expert (handle case where row might not have been created by Auth Trigger)
+        expert_res = supabase.table("experts").upsert({
+            "id": current_expert_id,
+            "name": request.name or "Expert",
             "domain": request.domain,
             "stream_type": request.stream_type,
             "course_title": request.course_title,
@@ -132,7 +134,7 @@ async def intake_endpoint(request: ExpertIntakeRequest, current_expert_id: str =
             "years_of_experience": request.years_of_experience,
             "short_bio": request.short_bio,
             "linkedin_url": request.linkedin_url
-        }).eq("id", current_expert_id).execute()
+        }).execute()
         
         expert_id = current_expert_id
         
@@ -371,23 +373,105 @@ async def start_session_endpoint(current_expert_id: str = Depends(get_current_ex
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
+# FIELD SUGGESTIONS (AUTOCOMPLETE CACHE)
+# ============================================================
+
+@app.get("/field-suggestions")
+async def get_field_suggestions(current_expert_id: str = Depends(get_current_expert_id)):
+    """Returns previously used distinct values for intake form fields from all experts."""
+    try:
+        res = supabase.table("experts").select(
+            "domain, target_audience, short_bio, years_of_experience"
+        ).order("created_at", desc=True).limit(50).execute()
+
+        domains, audiences, bios, years = set(), set(), set(), set()
+        for row in res.data:
+            if row.get("domain"): domains.add(row["domain"])
+            if row.get("target_audience"): audiences.add(row["target_audience"])
+            if row.get("short_bio"): bios.add(row["short_bio"])
+            if row.get("years_of_experience") is not None:
+                years.add(row["years_of_experience"])
+
+        return {
+            "status": "success",
+            "suggestions": {
+                "domain": sorted(list(domains)),
+                "target_audience": sorted(list(audiences)),
+                "short_bio": sorted(list(bios)),
+                "years_of_experience": sorted(list(years))
+            }
+        }
+    except Exception as e:
+        logger.error(f"Field suggestions error: {e}")
+        return {"status": "success", "suggestions": {}}
+
+# ============================================================
 # KNOWLEDGE REPORTS (DASHBOARD)
 # ============================================================
 
 @app.get("/knowledge-report")
 async def get_knowledge_report(current_expert_id: str = Depends(get_current_expert_id)):
-    """Returns accumulated expert profile + curriculum blueprints."""
+    """Returns the unified knowledge output:
+       { persona, course (modules→topics→7 slots), tacit_insights, war_stories, mental_models }
+    """
     try:
+        # Primary source: latest synthesized session for this expert
+        sess_res = (
+            supabase.table("interview_sessions")
+            .select("session_synthesis, status, iteration_number")
+            .eq("expert_id", current_expert_id)
+            .eq("status", "synthesized")
+            .order("iteration_number", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if sess_res.data and sess_res.data[0].get("session_synthesis"):
+            synth = sess_res.data[0]["session_synthesis"]
+            ko = synth.get("knowledge_output")
+            if ko:
+                return {"status": "success", "knowledge_output": ko}
+            # Legacy fallback: sessions synthesized before the knowledge_output key existed
+            general = synth.get("general", {})
+            tutor = synth.get("tutor", {})
+            persona_raw = tutor.get("tutor_persona", {})
+            ko = {
+                "persona": {
+                    "system_prompt": persona_raw.get("system_prompt", ""),
+                    "teaching_style": persona_raw.get("teaching_style", ""),
+                    "linguistic_fingerprint": persona_raw.get("linguistic_fingerprint", {})
+                },
+                "course": tutor.get("course_structure", {}),
+                "tacit_insights": general.get("tacit_insights", []),
+                "war_stories": general.get("war_stories", []),
+                "mental_models": general.get("mental_models", []),
+                "pattern_breaks": general.get("pattern_breaks", []),
+                "structured_tacit_notes": tutor.get("structured_tacit_notes", [])
+            }
+            return {"status": "success", "knowledge_output": ko}
+
+        # Final fallback: read raw from expert_profile + curriculum_blueprints tables
         ep_res = supabase.table("expert_profile").select("*").eq("expert_id", current_expert_id).execute()
         cb_res = supabase.table("curriculum_blueprints").select("*").eq("expert_id", current_expert_id).execute()
-        
-        return {
-            "status": "success",
-            "expert_profile": ep_res.data[0] if ep_res.data else {},
-            "curriculum_blueprints": cb_res.data[0] if cb_res.data else {}
+        ep = ep_res.data[0] if ep_res.data else {}
+        cb = cb_res.data[0] if cb_res.data else {}
+        ko = {
+            "persona": {
+                "system_prompt": ep.get("system_prompt", ""),
+                "teaching_style": ep.get("teaching_style", ""),
+                "linguistic_fingerprint": ep.get("linguistic_fingerprint", {})
+            },
+            "course": {"modules": cb.get("course_modules", [])},
+            "tacit_insights": ep.get("tacit_insights", []),
+            "war_stories": ep.get("war_stories", []),
+            "mental_models": ep.get("mental_models", []),
+            "pattern_breaks": ep.get("pattern_breaks", []),
+            "structured_tacit_notes": []
         }
+        return {"status": "success", "knowledge_output": ko}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================================
 # RAG INGESTION HELPERS (KEPT AS-IS)

@@ -97,6 +97,13 @@ Return ONLY this JSON, no other text:
 # Per-objective minimum requirements injected into the satisfaction evaluator.
 # These define the FLOOR of what each objective needs — not a ceiling.
 OBJECTIVE_REQUIREMENTS = {
+    "Initial Learning Challenges": (
+        "1. ONE specific challenge, difficulty, or setback they faced while learning or early in their career. "
+        "2. What they did to overcome it OR what lesson they took from it. "
+        "This objective is SATISFIED if the expert describes any difficulty, mistake, setback, or struggle — "
+        "even briefly. Do NOT require them to use specific phrases like 'hardest part'. "
+        "If they have described a failure, setback, or lesson learned from early on, mark as SATISFIED."
+    ),
     "Origin Story": (
         "1. Why they entered this field (motivation or pull factor). "
         "2. One moment or experience that confirmed or started the path. "

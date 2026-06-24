@@ -122,13 +122,22 @@ The "system_prompt" field must contain ALL of these sections:
 
 INFERRED FLAG RULE:
 - Set "inferred": false → if the expert explicitly discussed this topic in the transcript.
-- Set "inferred": true → if the topic was NEVER discussed but is logically necessary to complete the curriculum. For example, if the expert teaches advanced configuration but never mentioned basics, you may infer a "Fundamentals" module — but you MUST flag it as inferred. If true, you MUST populate the "inference_rationale" field explaining why this leap in logic was necessary.
+- Set "inferred": true → if the topic was NEVER discussed but is logically necessary to complete the curriculum.
 
-LITMUS TESTS: Identify the specific questions, scenarios, or tests the expert uses in the real world to assess if someone actually understands a concept, rather than just reciting the textbook definition. Extract these into the "litmus_test" field for each topic.
+7-SLOT EXTRACTION RULE (CRITICAL):
+For EACH topic, you must extract ALL 7 knowledge slots from the transcript:
+- concept: What is this topic in plain terms? What does the expert say it fundamentally is?
+- breakdown: How does the expert break it down step-by-step or layer-by-layer?
+- edge_cases: What unusual or non-obvious situations did the expert mention where this breaks or behaves differently?
+- constraints: What limitations, tradeoffs, or "do not use when X" rules did the expert state?
+- action_items: What specific hands-on steps or exercises should a learner do to practice this?
+- evaluation_path: How does the expert test if someone truly understands this? What does mastery look like?
+- common_mistakes: What errors do beginners or practitioners commonly make with this topic?
+- expert_story: Any personal story or lived experience the expert shared about this topic (verbatim summary)
+- expert_heuristic: Any rule-of-thumb, IF/THEN rule, or mental model the expert stated (verbatim or close paraphrase)
+- reference_guides: Any specific books, videos, docs, or resources the expert mentioned for this topic
 
-EXTRACTION LIMITS (CRITICAL):
-- course_structure.modules: Extract as many as naturally fit the curriculum.
-- structured_tacit_notes: MAXIMUM 5 themes total (focus only on the most critical takeaways).
+If the transcript doesn't cover a slot for a topic, set it to null. Do NOT invent content.
 
 Return a STRICT JSON object matching this schema:
 {{
@@ -140,7 +149,7 @@ Return a STRICT JSON object matching this schema:
       "signature_phrases_or_metaphors": ["Exact phrases or analogies the expert repeatedly uses"],
       "explanation_blueprint": "How they structure explanations (e.g., 'always gives a real example before the concept')"
     }},
-    "system_prompt": "A COMPLETE, ready-to-use LLM system prompt containing all 6 sections listed above (IDENTITY, VOICE, TEACHING STYLE, EMOTIONAL TONE, DOMAIN ANCHORS, BANNED BEHAVIORS)."
+    "system_prompt": "A COMPLETE, ready-to-use LLM system prompt containing all 6 sections (IDENTITY, VOICE, TEACHING STYLE, EMOTIONAL TONE, DOMAIN ANCHORS, BANNED BEHAVIORS)."
   }},
   "course_structure": {{
     "course_title": "Title derived from the interview content",
@@ -151,12 +160,18 @@ Return a STRICT JSON object matching this schema:
         "topics": [
           {{
             "topic_title": "Specific lesson name",
-            "key_concepts": ["Concept 1", "Concept 2"],
-            "suggested_format": "video lecture | hands-on exercise | quiz | case study",
-            "tutor_insight": "Specific nugget FROM THE INTERVIEW about WHY this matters",
-            "litmus_test": "How the expert specifically tests competence on this topic",
+            "concept": "Plain-language explanation of what this topic is",
+            "breakdown": "Step-by-step or layered explanation of how it works",
+            "edge_cases": "Non-obvious situations where this behaves differently or breaks",
+            "constraints": "Limitations, tradeoffs, or 'do not use when' rules",
+            "action_items": ["Specific hands-on steps or exercises for the learner"],
+            "evaluation_path": "How the expert tests true understanding; what mastery looks like",
+            "common_mistakes": ["Errors beginners or practitioners commonly make"],
+            "expert_story": "Verbatim summary of any personal story the expert shared about this topic",
+            "expert_heuristic": "Rule-of-thumb or IF/THEN mental model the expert stated",
+            "reference_guides": ["Books, videos, docs, or resources the expert mentioned"],
             "inferred": false,
-            "inference_rationale": "Why this was inferred (only if inferred: true, else null)"
+            "inference_rationale": null
           }}
         ]
       }}
