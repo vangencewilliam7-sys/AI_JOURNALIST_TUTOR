@@ -5,6 +5,7 @@ import ScriptPage from './pages/ScriptPage';
 import InterviewPage from './pages/InterviewPage';
 import ReportPage from './pages/ReportPage';
 import HomeworkPage from './pages/HomeworkPage';
+import KnowledgeOutputPage from './pages/KnowledgeOutputPage';
 import { LoginPage } from './pages/LoginPage';
 import { AuthProvider, useAuth } from './context/AuthContext';
 
@@ -28,6 +29,7 @@ const App: React.FC = () => {
           <Route path="/interview" element={<ProtectedRoute><InterviewPage /></ProtectedRoute>} />
           <Route path="/report" element={<ProtectedRoute><ReportPage /></ProtectedRoute>} />
           <Route path="/homework" element={<ProtectedRoute><HomeworkPage /></ProtectedRoute>} />
+          <Route path="/knowledge" element={<ProtectedRoute><KnowledgeOutputPage /></ProtectedRoute>} />
         </Routes>
       </Router>
     </AuthProvider>
