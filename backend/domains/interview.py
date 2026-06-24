@@ -22,7 +22,9 @@ from prompts import (
     RETRIEVAL_GATE_PROMPT,
     SCRATCHPAD_UPDATE_PROMPT,
     OBJECTIVE_SATISFACTION_PROMPT,
-    OBJECTIVE_REQUIREMENTS
+    OBJECTIVE_REQUIREMENTS,
+    COVERAGE_ENGINE_PROMPT,
+    TOPIC_CONTROLLER_PROMPT
 )
 
 logger = logging.getLogger(__name__)
@@ -270,6 +272,77 @@ class InterviewDomain(BaseDomain):
                 except Exception as e:
                     logger.error(f"Retrieval error: {e}")
         # ─────────────────────────────────────────────────────────────────────
+        # ── MASTER INTERVIEW CONTROLLER (Block 3 & 4 only) ───────────────────
+        # Block 1 & Block 2 are UNTOUCHED. This only runs for curriculum
+        # discovery (Block 3) and topic extraction (Block 4).
+        if active_block and ("Block 3" in active_block or "Block 4" in active_block):
+            try:
+                sp = locals().get("updated_scratchpad", current_scratchpad)
+                node_checklist = sp.get("node_checklist", {})
+                current_topic_name = sp.get("current_topic") or "Unknown"
+
+                # Build curriculum map summary from scratchpad
+                curriculum_map_str = json.dumps(node_checklist, indent=2) if node_checklist else "Not yet mapped."
+
+                # Determine current module from scratchpad or script question
+                current_module_name = sp.get("current_module") or current_script_question or "Unknown"
+
+                # Coverage scores for current topic (Block 4 only)
+                topic_node = node_checklist.get(current_topic_name, {})
+                coverage_scores_str = json.dumps(
+                    {k: v for k, v in topic_node.items() if k != "status"}, indent=2
+                ) if topic_node else "N/A (Block 3 or no data yet)"
+
+                topic_status = topic_node.get("status", "NOT_STARTED") if isinstance(topic_node, dict) else "NOT_STARTED"
+
+                # Build module progress
+                module_topics = [
+                    f"{t}: {info.get('status', 'NOT_STARTED')}"
+                    for t, info in node_checklist.items()
+                    if isinstance(info, dict)
+                ]
+                module_progress_str = ", ".join(module_topics) if module_topics else "No topics tracked yet."
+
+                ctrl_res = self.llm_fast.invoke(MASTER_INTERVIEW_CONTROLLER_PROMPT.format(
+                    current_block=active_block,
+                    current_module=current_module_name,
+                    current_topic=current_topic_name,
+                    topic_status=topic_status,
+                    module_progress=module_progress_str,
+                    curriculum_map=curriculum_map_str,
+                    coverage_scores=coverage_scores_str
+                ))
+                ctrl_cl = ctrl_res.content.strip()
+                if "```json" in ctrl_cl:
+                    ctrl_cl = ctrl_cl.split("```json")[1].split("```")[0].strip()
+                ctrl_cl = re.sub(r',\s*([}\]])', r'\1', ctrl_cl)
+                ctrl_data = json.loads(ctrl_cl)
+
+                ctrl_action = ctrl_data.get("action", "STAY_IN_TOPIC")
+                ctrl_reason = ctrl_data.get("reasoning", "")
+                logger.info(f"Master Controller [{active_block}]: {ctrl_action} — {ctrl_reason}")
+
+                # If controller says to advance, return skip immediately
+                if ctrl_action in ("NEXT_TOPIC", "NEXT_MODULE", "NEXT_BLOCK"):
+                    self.supabase.table("interview_sessions").update(
+                        {"raw_transcript": new_transcript}
+                    ).eq("id", session_id).execute()
+                    return {
+                        "question": None,
+                        "decision": {
+                            "action": "next_script_question",
+                            "intent": "skip",
+                            "reasoning": f"Master Controller: {ctrl_action} — {ctrl_reason}",
+                            "controller_action": ctrl_action,
+                            "next_topic": ctrl_data.get("next_topic"),
+                            "next_module": ctrl_data.get("next_module")
+                        }
+                    }
+                # STAY_IN_TOPIC: fall through to normal generation pipeline
+
+            except Exception as e:
+                logger.warning(f"Master Interview Controller failed, continuing normally: {e}")
+        # ─────────────────────────────────────────────────────────────────────
 
         # ── EXTRACTION SATISFACTION EVALUATOR ─────────────────────────────
         # Runs via llm_fast BEFORE the main copilot prompt.
@@ -362,6 +435,121 @@ class InterviewDomain(BaseDomain):
             satisfaction_context = "(Satisfaction evaluator not run — proceed with objective compass.)"
         # ─────────────────────────────────────────────────────────────────────
 
+        # ── PHASE 4: COVERAGE ENGINE (Block 4 only) ───────────────────────────
+        # Runs AFTER the satisfaction evaluator. Scores 8 knowledge fields
+        # (0.0–1.0) for the current topic and injects TOPIC_COMPLETE /
+        # TOPIC_INCOMPLETE status into the copilot prompt.
+        if active_block and "Block 4" in active_block:
+            try:
+                current_topic_name = (
+                    updated_scratchpad.get("current_topic")
+                    or current_scratchpad.get("current_topic")
+                    or "Current Topic"
+                )
+                # Build topic-specific expert transcript (all turns so far)
+                topic_expert_lines = [
+                    line.strip()[len("[EXPERT]:"):].strip()
+                    for line in current_transcript.split("\n")
+                    if line.strip().startswith("[EXPERT]:")
+                ]
+                topic_transcript_str = "\n\n".join(topic_expert_lines)
+
+                cov_res = self.llm_fast.invoke(COVERAGE_ENGINE_PROMPT.format(
+                    current_topic=current_topic_name,
+                    expert_transcript=topic_transcript_str
+                ))
+                cov_cl = cov_res.content.strip()
+                if "```json" in cov_cl:
+                    cov_cl = cov_cl.split("```json")[1].split("```")[0].strip()
+                cov_cl = re.sub(r',\s*([}\]])', r'\1', cov_cl)
+                cov_data = json.loads(cov_cl)
+
+                cov_status = cov_data.get("status", "TOPIC_INCOMPLETE")
+                cov_weakest = cov_data.get("weakest_fields", [])
+                cov_lenses = cov_data.get("recommended_lenses", [])
+                cov_missing = cov_data.get("missing_summary") or "No summary."
+                cov_scores = cov_data.get("coverage", {})
+
+                # Persist scored coverage into scratchpad node_checklist
+                node_cl = updated_scratchpad.setdefault("node_checklist", {})
+                node_cl[current_topic_name] = {**cov_scores, "status": cov_status}
+                updated_scratchpad["node_checklist"] = node_cl
+                self.supabase.table("interview_sessions").update(
+                    {"live_scratchpad": updated_scratchpad}
+                ).eq("id", session_id).execute()
+
+                if cov_status == "TOPIC_COMPLETE":
+                    satisfaction_context = (
+                        f"COVERAGE ENGINE: Topic '{current_topic_name}' is TOPIC_COMPLETE.\n"
+                        f"All 8 knowledge fields have met their evidence thresholds.\n"
+                        f"ACTION: Return intent='skip'. The controller will advance to the next topic."
+                    )
+                    logger.info(f"Coverage Engine: '{current_topic_name}' COMPLETE.")
+                else:
+                    weakest_str = ", ".join(cov_weakest) if cov_weakest else "unknown"
+                    lenses_str = ", ".join(cov_lenses) if cov_lenses else "any"
+                    satisfaction_context = (
+                        f"COVERAGE ENGINE: Topic '{current_topic_name}' is TOPIC_INCOMPLETE.\n"
+                        f"Weakest Fields (priority targets): {weakest_str}\n"
+                        f"Recommended Lenses: {lenses_str}\n"
+                        f"Critical Gap: {cov_missing}\n"
+                        f"ACTION: Use one of the recommended lenses to fill the weakest field. "
+                        f"Do NOT ask generically — target the named gap directly."
+                    )
+                    logger.info(f"Coverage Engine: '{current_topic_name}' INCOMPLETE. Weakest: {weakest_str}")
+
+            except Exception as e:
+                logger.warning(f"Coverage Engine failed, using satisfaction context: {e}")
+
+        # ── TOPIC CONTROLLER (Block 3 & Block 4 only) ────────────────────────
+        if active_block and ("Block 3" in active_block or "Block 4" in active_block):
+            try:
+                # Extract state from scratchpad
+                sp = locals().get("updated_scratchpad", current_scratchpad)
+                current_module = sp.get("current_module", "Unknown")
+                current_topic = sp.get("current_topic", "Unknown")
+                node_checklist = sp.get("node_checklist", {})
+                
+                module_progress = [
+                    f"{t}: {info.get('status', 'NOT_STARTED')}" 
+                    for t, info in node_checklist.items() 
+                    if isinstance(info, dict)
+                ]
+                
+                ctrl_res = self.llm_fast.invoke(TOPIC_CONTROLLER_PROMPT.format(
+                    current_module=current_module,
+                    current_topic=current_topic,
+                    module_progress=json.dumps(module_progress),
+                    curriculum_map=json.dumps(node_checklist)
+                ))
+                
+                ctrl_cl = ctrl_res.content.strip()
+                if "```json" in ctrl_cl:
+                    ctrl_cl = ctrl_cl.split("```json")[1].split("```")[0].strip()
+                ctrl_cl = re.sub(r',\s*([}\]])', r'\1', ctrl_cl)
+                ctrl_data = json.loads(ctrl_cl)
+                
+                ctrl_action = ctrl_data.get("action", "STAY_IN_TOPIC")
+                next_topic = ctrl_data.get("current_topic")
+                
+                if ctrl_action in ["NEXT_TOPIC", "NEXT_MODULE"] and next_topic:
+                    logger.info(f"Topic Controller advancing to {next_topic} ({ctrl_action})")
+                    # Update scratchpad with the new active topic
+                    sp["current_topic"] = next_topic
+                    self.supabase.table("interview_sessions").update(
+                        {"live_scratchpad": sp}
+                    ).eq("id", session_id).execute()
+                    
+                    satisfaction_context = (
+                        f"TOPIC CONTROLLER VERDICT: {ctrl_action}\n"
+                        f"REASONING: {ctrl_data.get('reasoning')}\n"
+                        f"ACTION: You MUST explicitly transition the conversation to the new topic: '{next_topic}'. "
+                        f"Generate a question that introduces this topic."
+                    )
+            except Exception as e:
+                logger.warning(f"Topic Controller failed: {e}")
+        # ─────────────────────────────────────────────────────────────────────
+
         # ── THREAD SCORING ALGORITHM (WITH INFINITE LOOP PROTECTION) ─────────
         highest_value_thread = "None (No open threads)"
         current_sp = locals().get("updated_scratchpad", current_scratchpad)
@@ -399,6 +587,12 @@ THREADS:
         # ─────────────────────────────────────────────────────────────────────
 
         # 4. Build prompt kwargs (used by both first attempt and retry)
+        # Safely extract topic and coverage from scratchpad for Block 4 prompt
+        current_topic_name = current_sp.get("current_topic", "Unknown")
+        topic_node = current_sp.get("node_checklist", {}).get(current_topic_name, {})
+        coverage_str = json.dumps(topic_node) if isinstance(topic_node, dict) else "None"
+        missing_areas_str = locals().get("weakest_str", "Unknown")
+        
         prompt_kwargs = dict(
             active_block=active_block,
             active_script_question=current_script_question,
@@ -410,7 +604,10 @@ THREADS:
             expert_answer=expert_answer,
             archetype_rules=get_archetype_rules(archetype),
             pacing_warning=pacing_warning,
-            target_thread=highest_value_thread
+            target_thread=highest_value_thread,
+            current_topic=current_topic_name,
+            coverage_scores=coverage_str,
+            missing_areas=missing_areas_str
         )
 
         # ── FIX 1.2 — Safe JSON parse with retry ─────────────────────────────
@@ -958,6 +1155,26 @@ THREADS:
             "status": "synthesized",
             "session_synthesis": session_synthesis
         }).eq("id", session_id).execute()
+
+        # Insert into the new tacit_knowledge_reports table
+        try:
+            report_title = f"Knowledge Report - Iteration {iteration_number}"
+            self.supabase.table("tacit_knowledge_reports").insert({
+                "expert_id": expert["id"],
+                "session_id_fk": session_id,
+                "report_title": report_title,
+                "structured_tacit_notes": {
+                    "tacit_insights": general_data.get("tacit_insights", []),
+                    "war_stories": general_data.get("war_stories", []),
+                    "mental_models": general_data.get("mental_models", []),
+                    "pattern_breaks": general_data.get("pattern_breaks", []),
+                    "tutor_notes": tutor_data.get("structured_tacit_notes", []) if tutor_data else []
+                },
+                "persona_snapshot": knowledge_output["persona"],
+                "course_structure": knowledge_output["course"]
+            }).execute()
+        except Exception as e:
+            logger.error(f"Failed to insert into tacit_knowledge_reports: {e}")
 
         return {"status": "success", "knowledge_output": knowledge_output}
 
