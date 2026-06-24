@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { supabase } from '../supabaseClient';
 import { Mic, MicOff, Send, PauseCircle, Loader2, BrainCircuit, Eye, Target, Zap, FileText, ArrowRight } from 'lucide-react';
 
 interface Message {
@@ -54,20 +55,58 @@ const InterviewPage: React.FC = () => {
       return;
     }
 
-    // Seed the conversation with a generic opening
-    setMessages([
-      {
-        id: '1',
-        role: 'ai',
-        text: icebreakerData.opening_icebreaker || "Welcome to the studio. We're excited to dive into your background and extract the unwritten rules of your domain.",
-        timestamp: Date.now() - 600000,
-        decision: {
-          intent_classification: 'opening_question',
-          internal_reasoning: 'Day 1 opening icebreaker from the generated script.',
-          action: 'script_question'
+    const restoredTranscript = localStorage.getItem('restored_transcript');
+    const reentryStatement = localStorage.getItem('reentry_statement');
+
+    if (restoredTranscript && reentryStatement) {
+      const parsedMessages: Message[] = [];
+      const lines = restoredTranscript.split('\n');
+      let currentRole: 'ai' | 'expert' = 'ai';
+      let currentText = '';
+      for (const line of lines) {
+        if (line.startsWith('[AI JOURNALIST]: ')) {
+          if (currentText) parsedMessages.push({ id: Math.random().toString(), role: currentRole, text: currentText.trim(), timestamp: Date.now() });
+          currentRole = 'ai';
+          currentText = line.substring(17) + '\n';
+        } else if (line.startsWith('[EXPERT]: ')) {
+          if (currentText) parsedMessages.push({ id: Math.random().toString(), role: currentRole, text: currentText.trim(), timestamp: Date.now() });
+          currentRole = 'expert';
+          currentText = line.substring(10) + '\n';
+        } else if (line.startsWith('[SCRIPT]: ')) {
+          // Ignore script stamping lines
+        } else {
+          currentText += line + '\n';
         }
       }
-    ]);
+      if (currentText.trim()) parsedMessages.push({ id: Math.random().toString(), role: currentRole, text: currentText.trim(), timestamp: Date.now() });
+
+      parsedMessages.push({
+        id: 'reentry',
+        role: 'ai',
+        text: reentryStatement,
+        timestamp: Date.now(),
+        decision: { intent_classification: 're_entry', internal_reasoning: 'Resumed session. Generating contextual re-entry.', action: 'continue' }
+      });
+
+      setMessages(parsedMessages);
+      localStorage.removeItem('restored_transcript');
+      localStorage.removeItem('reentry_statement');
+    } else {
+      // Seed the conversation with a generic opening
+      setMessages([
+        {
+          id: '1',
+          role: 'ai',
+          text: icebreakerData.opening_icebreaker || "Welcome to the studio. We're excited to dive into your background and extract the unwritten rules of your domain.",
+          timestamp: Date.now() - 600000,
+          decision: {
+            intent_classification: 'opening_question',
+            internal_reasoning: 'Day 1 opening icebreaker from the generated script.',
+            action: 'script_question'
+          }
+        }
+      ]);
+    }
 
     // Fetch the script data for the sidebar
     fetch(`http://localhost:9120/session/${sessionId}`, { headers: { 'Authorization': `Bearer ${session?.access_token}` } })
@@ -92,9 +131,27 @@ const InterviewPage: React.FC = () => {
               questions: phase.questions || []
             }));
           setScriptThemes(extractedThemes);
-          // Reset pointer to 0,0 whenever a new script loads
-          setActiveBlockIdx(0);
-          setActiveQuestionIdx(0);
+
+          const restoredSnapshotStr = localStorage.getItem('restored_snapshot');
+          if (restoredSnapshotStr) {
+            try {
+              const restoredSnapshot = JSON.parse(restoredSnapshotStr);
+              if (restoredSnapshot.active_block) {
+                const bIdx = extractedThemes.findIndex(t => t.theme_title === restoredSnapshot.active_block);
+                if (bIdx >= 0) {
+                  setActiveBlockIdx(bIdx);
+                  const qIdx = extractedThemes[bIdx].questions.findIndex((q: any) => q.question_text === restoredSnapshot.current_script_question);
+                  if (qIdx >= 0) setActiveQuestionIdx(qIdx);
+                }
+                setTangentCount(restoredSnapshot.tangent_count || 0);
+              }
+            } catch (e) { console.error("Error parsing snapshot", e); }
+            localStorage.removeItem('restored_snapshot');
+          } else {
+            // Reset pointer to 0,0 whenever a new script loads
+            setActiveBlockIdx(0);
+            setActiveQuestionIdx(0);
+          }
         }
       })
       .catch(err => console.error("Failed to fetch session script", err));
@@ -239,6 +296,37 @@ const InterviewPage: React.FC = () => {
     }
   };
 
+  // ─── handlePauseSession ───────────────────────────────────────────────────
+  const handlePauseSession = async () => {
+    setIsLoading(true);
+    try {
+      const res = await fetch(`http://localhost:9120/pause-session/${sessionId}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session?.access_token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          current_script_question: currentActiveQuestion,
+          active_block: activeBlock,
+          tangent_count: tangentCount
+        })
+      });
+
+      if (res.ok) {
+        await supabase.auth.signOut();
+        navigate('/login');
+      } else {
+        alert("Failed to pause session.");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Network error.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // ─── handleNextBlock (manual override button) ─────────────────────────────
   const handleNextBlock = () => {
     const nextBlockIdx = activeBlockIdx + 1;
@@ -249,7 +337,7 @@ const InterviewPage: React.FC = () => {
 
       // Immediately push the new script question to the chat feed for testing
       const newQuestion = scriptThemes[nextBlockIdx]?.questions?.[0]?.question_text || "Let's move on to the next topic.";
-      
+
       setMessages(prev => [...prev, {
         id: Date.now().toString(),
         role: 'ai',
@@ -279,119 +367,119 @@ const InterviewPage: React.FC = () => {
   return (
     <div style={{ display: 'flex', height: '100vh', width: '100vw', overflow: 'hidden', background: 'var(--bg)' }}>
       <div className="chat-page" style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <header className="chat-header">
-        <div className="chat-header-left">
-          <button className="chat-logo-btn" onClick={() => setShowScriptSidebar(!showScriptSidebar)}>
-            <BrainCircuit size={20} />
-          </button>
-          <div className="chat-header-info">
-            <h1>Live Interview — Demo Expert</h1>
-            <div className="chat-header-status">
-              <div className="pulse-dot" style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--green)' }}></div>
-              SESS-DEMO-DAY1 · Recording Active
+        <header className="chat-header">
+          <div className="chat-header-left">
+            <button className="chat-logo-btn" onClick={() => setShowScriptSidebar(!showScriptSidebar)}>
+              <BrainCircuit size={20} />
+            </button>
+            <div className="chat-header-info">
+              <h1>Live Interview — Demo Expert</h1>
+              <div className="chat-header-status">
+                <div className="pulse-dot" style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--green)' }}></div>
+                SESS-DEMO-DAY1 · Recording Active
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="chat-header-right" style={{ gap: '12px', display: 'flex', alignItems: 'center' }}>
-          <div className="progress-section" style={{ marginRight: '16px', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', maxWidth: '360px' }}>
-            <label style={{ fontSize: '11px', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Active Block: {activeBlock}</label>
-            <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text)', textAlign: 'right', marginTop: '2px', opacity: 0.8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              Q{activeQuestionIdx + 1}: {currentActiveQuestion.slice(0, 60)}{currentActiveQuestion.length > 60 ? '…' : ''}
+          <div className="chat-header-right" style={{ gap: '12px', display: 'flex', alignItems: 'center' }}>
+            <div className="progress-section" style={{ marginRight: '16px', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', maxWidth: '360px' }}>
+              <label style={{ fontSize: '11px', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Active Block: {activeBlock}</label>
+              <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text)', textAlign: 'right', marginTop: '2px', opacity: 0.8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                Q{activeQuestionIdx + 1}: {currentActiveQuestion.slice(0, 60)}{currentActiveQuestion.length > 60 ? '…' : ''}
+              </div>
+              <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>Tangent Depth: {tangentCount}</div>
             </div>
-            <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>Tangent Depth: {tangentCount}</div>
+
+            <button className="btn-ghost" style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={handleNextBlock}>
+              Next Block <ArrowRight size={14} style={{ marginLeft: '6px', verticalAlign: '-2px' }} />
+            </button>
+            <button className="btn-ghost" style={{ borderColor: 'var(--red)', color: 'var(--red)' }} onClick={handleEndInterview} disabled={isSynthesizing}>
+              <PauseCircle size={14} style={{ marginRight: '6px', verticalAlign: '-2px' }} /> PAUSE INTERVIEW
+            </button>
           </div>
+        </header>
 
-          <button className="btn-ghost" style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={handleNextBlock}>
-            Next Block <ArrowRight size={14} style={{ marginLeft: '6px', verticalAlign: '-2px' }} />
-          </button>
-          <button className="btn-ghost" style={{ borderColor: 'var(--red)', color: 'var(--red)' }} onClick={() => handleEndInterview()} disabled={isSynthesizing}>
-            <PauseCircle size={14} style={{ marginRight: '6px', verticalAlign: '-2px' }} /> PAUSE INTERVIEW
-          </button>
-        </div>
-      </header>
-
-      <div className="chat-feed" ref={scrollRef}>
-        {messages.map(m => (
-          <div key={m.id} className={`msg msg-${m.role}`}>
-            <div className="msg-label">
-              {m.role === 'expert' ? 'Demo Expert' : 'AI Journalist'}
-              {m.role === 'ai' && m.decision && (
-                <button className="decision-toggle" onClick={() => setShowDecision(showDecision === m.id ? null : m.id)}>
-                  <Zap size={10} /> AI Decision Log
-                </button>
-              )}
-            </div>
-            <div className="msg-bubble">
-              <div className="msg-text">{m.text}</div>
-            </div>
-            {m.role === 'ai' && m.decision && showDecision === m.id && (
-              <div className="decision-section">
-                <div className="decision-panel">
-                  <div className="decision-grid">
-                    <div className="decision-item">
-                      <div className="decision-item-label"><Target size={10} /> Intent Classification</div>
-                      <div className="decision-item-value">
-                        <span className={`depth-tag depth-deep`}>{m.decision.intent_classification}</span>
+        <div className="chat-feed" ref={scrollRef}>
+          {messages.map(m => (
+            <div key={m.id} className={`msg msg-${m.role}`}>
+              <div className="msg-label">
+                {m.role === 'expert' ? 'Demo Expert' : 'AI Journalist'}
+                {m.role === 'ai' && m.decision && (
+                  <button className="decision-toggle" onClick={() => setShowDecision(showDecision === m.id ? null : m.id)}>
+                    <Zap size={10} /> AI Decision Log
+                  </button>
+                )}
+              </div>
+              <div className="msg-bubble">
+                <div className="msg-text">{m.text}</div>
+              </div>
+              {m.role === 'ai' && m.decision && showDecision === m.id && (
+                <div className="decision-section">
+                  <div className="decision-panel">
+                    <div className="decision-grid">
+                      <div className="decision-item">
+                        <div className="decision-item-label"><Target size={10} /> Intent Classification</div>
+                        <div className="decision-item-value">
+                          <span className={`depth-tag depth-deep`}>{m.decision.intent_classification}</span>
+                        </div>
+                      </div>
+                      <div className="decision-item">
+                        <div className="decision-item-label"><Zap size={10} /> Action</div>
+                        <div className="decision-item-value">{m.decision.action}</div>
                       </div>
                     </div>
-                    <div className="decision-item">
-                      <div className="decision-item-label"><Zap size={10} /> Action</div>
-                      <div className="decision-item-value">{m.decision.action}</div>
+                    <div className="decision-monologue">
+                      <div className="decision-item-label"><Eye size={10} /> Internal Reasoning</div>
+                      <p style={{ fontSize: '13px', color: 'var(--text-dim)', lineHeight: '1.6', marginTop: '6px' }}>{m.decision.internal_reasoning}</p>
                     </div>
                   </div>
-                  <div className="decision-monologue">
-                    <div className="decision-item-label"><Eye size={10} /> Internal Reasoning</div>
-                    <p style={{ fontSize: '13px', color: 'var(--text-dim)', lineHeight: '1.6', marginTop: '6px' }}>{m.decision.internal_reasoning}</p>
-                  </div>
                 </div>
-              </div>
-            )}
-          </div>
-        ))}
-        {isLoading && (
-          <div className="msg msg-ai">
-            <div className="typing-indicator">
-              <div className="typing-dots">
-                <div className="typing-dot" /><div className="typing-dot" /><div className="typing-dot" />
-              </div>
-              <span className="typing-text">Synthesizing follow-up...</span>
+              )}
             </div>
-          </div>
-        )}
-      </div>
-
-      <div className="chat-input-bar">
-        <div className="chat-input-wrapper">
-          <button
-            className={`mic-btn ${isRecording ? 'recording' : ''}`}
-            onClick={() => setIsRecording(!isRecording)}
-            disabled={isTranscribing}
-          >
-            {isTranscribing ? <Loader2 size={20} className="spin" /> : (isRecording ? <MicOff size={20} /> : <Mic size={20} />)}
-          </button>
-          <textarea
-            value={inputText}
-            onChange={e => setInputText(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(inputText); }
-            }}
-            placeholder="Type expert's response..."
-            className="chat-textarea"
-            rows={1}
-          />
-          <button className="send-btn" onClick={() => handleSend(inputText)} disabled={isLoading || !inputText.trim()}>
-            <Send size={20} />
-          </button>
+          ))}
+          {isLoading && (
+            <div className="msg msg-ai">
+              <div className="typing-indicator">
+                <div className="typing-dots">
+                  <div className="typing-dot" /><div className="typing-dot" /><div className="typing-dot" />
+                </div>
+                <span className="typing-text">Synthesizing follow-up...</span>
+              </div>
+            </div>
+          )}
         </div>
-      </div>
+
+        <div className="chat-input-bar">
+          <div className="chat-input-wrapper">
+            <button
+              className={`mic-btn ${isRecording ? 'recording' : ''}`}
+              onClick={() => setIsRecording(!isRecording)}
+              disabled={isTranscribing}
+            >
+              {isTranscribing ? <Loader2 size={20} className="spin" /> : (isRecording ? <MicOff size={20} /> : <Mic size={20} />)}
+            </button>
+            <textarea
+              value={inputText}
+              onChange={e => setInputText(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(inputText); }
+              }}
+              placeholder="Type expert's response..."
+              className="chat-textarea"
+              rows={1}
+            />
+            <button className="send-btn" onClick={() => handleSend(inputText)} disabled={isLoading || !inputText.trim()}>
+              <Send size={20} />
+            </button>
+          </div>
+        </div>
       </div>
 
       {showScriptSidebar && (
         <div className="script-sidebar" style={{ width: '400px', height: '100%', background: 'var(--bg-card)', borderLeft: '1px solid var(--border)', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
           <div style={{ padding: '20px', borderBottom: '1px solid var(--border)', background: '#fff' }}>
             <h3 style={{ margin: 0, fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <FileText size={16} style={{ color: 'var(--accent)' }}/> Live Teleprompter
+              <FileText size={16} style={{ color: 'var(--accent)' }} /> Live Teleprompter
             </h3>
             <p style={{ margin: '4px 0 0', fontSize: '12px', color: 'var(--text-dim)' }}>Read these questions to guide the interview.</p>
           </div>

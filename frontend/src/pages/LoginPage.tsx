@@ -22,8 +22,44 @@ export const LoginPage = () => {
 
     try {
       if (isLogin) {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        const { data: { session }, error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
+        
+        // Auto-Resume Intercept: Check for active or paused sessions
+        try {
+          const res = await fetch('http://localhost:9120/sessions/active', {
+            headers: { 'Authorization': `Bearer ${session?.access_token}` }
+          });
+          const sessionData = await res.json();
+          
+          if (sessionData.status === 'found') {
+            const activeSessionId = sessionData.session.id;
+            // Store session data in localStorage so ScriptPage can pick it up
+            localStorage.setItem('session_id', activeSessionId);
+            localStorage.setItem('icebreaker', JSON.stringify(sessionData.session.script?.icebreaker || {}));
+            
+            // If it's explicitly paused, we must call resume to generate the re-entry statement
+            if (sessionData.session.status === 'paused') {
+                const resumeRes = await fetch(`http://localhost:9120/resume-session/${activeSessionId}`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${session?.access_token}` }
+                });
+                const resumeData = await resumeRes.json();
+                if (resumeData.status === 'resumed') {
+                    // ScriptPage will detect status and play this statement!
+                    localStorage.setItem('reentry_statement', resumeData.reentry_statement);
+                    localStorage.setItem('restored_transcript', resumeData.raw_transcript);
+                    localStorage.setItem('restored_snapshot', JSON.stringify(resumeData.snapshot));
+                }
+            }
+            
+            navigate('/script');
+            return; // bypass landing
+          }
+        } catch (fetchErr) {
+          console.error("Auto-resume check failed", fetchErr);
+        }
+
         navigate('/landing');
       } else {
         const { error } = await supabase.auth.signUp({

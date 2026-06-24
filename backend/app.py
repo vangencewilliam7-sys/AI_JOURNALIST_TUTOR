@@ -113,6 +113,11 @@ class LiveTurnRequest(BaseModel):
 class HomeworkPutRequest(BaseModel):
     human_manual_notes: str
 
+class PauseSessionRequest(BaseModel):
+    current_script_question: str
+    active_block: str
+    tangent_count: int
+
 # ============================================================
 # PHASE 2: INTAKE & SCRIPT GENERATION
 # ============================================================
@@ -295,6 +300,91 @@ async def end_session_endpoint(session_id: str, current_expert_id: str = Depends
     except Exception as e:
         logger.error(f"End session error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# SESSION MANAGEMENT (PAUSE / RESUME)
+# ============================================================
+
+@app.get("/sessions/active")
+async def get_active_session(current_expert_id: str = Depends(get_current_expert_id)):
+    """Finds the most recent paused or active session for auto-resume after login."""
+    res = supabase.table("interview_sessions")\
+        .select("id, status, script, raw_transcript, snapshot")\
+        .eq("expert_id", current_expert_id)\
+        .in_("status", ["active", "paused"])\
+        .order("created_at", desc=True)\
+        .limit(1)\
+        .execute()
+    
+    if not res.data:
+        return {"status": "none"}
+        
+    return {"status": "found", "session": res.data[0]}
+
+@app.post("/pause-session/{session_id}")
+async def pause_session_endpoint(session_id: str, request: PauseSessionRequest, current_expert_id: str = Depends(get_current_expert_id)):
+    """Marks a session as paused and saves the exact current state snapshot."""
+    # Verify ownership
+    session_res = supabase.table("interview_sessions").select("expert_id").eq("id", session_id).execute()
+    if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    snapshot_data = {
+        "current_script_question": request.current_script_question,
+        "active_block": request.active_block,
+        "tangent_count": request.tangent_count,
+        "paused_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    supabase.table("interview_sessions").update({
+        "status": "paused",
+        "snapshot": snapshot_data
+    }).eq("id", session_id).execute()
+    
+    return {"status": "paused"}
+
+@app.post("/resume-session/{session_id}")
+async def resume_session_endpoint(session_id: str, current_expert_id: str = Depends(get_current_expert_id)):
+    """Restores a session and generates a contextual re-entry statement."""
+    session_res = supabase.table("interview_sessions").select("*").eq("id", session_id).execute()
+    if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    session = session_res.data[0]
+    snapshot = session.get("snapshot", {}) or {}
+    
+    # Update status to active
+    supabase.table("interview_sessions").update({
+        "status": "active"
+    }).eq("id", session_id).execute()
+    
+    # Generate contextual re-entry statement
+    last_question = snapshot.get("current_script_question", "We were discussing your expertise.")
+    
+    system_prompt = (
+        "You are an expert journalist. The user has just returned from a break and resumed the interview session.\n"
+        "Your task is to generate a very brief, friendly 'Welcome back' re-entry statement.\n"
+        f"You MUST acknowledge that before the break, you were asking about: '{last_question}'\n"
+        "End your statement by asking them to continue or re-asking the question.\n"
+        "Keep it under 3 sentences."
+    )
+    
+    try:
+        response = await llm.ainvoke(system_prompt)
+        reentry_statement = response.content
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to generate re-entry statement: {e}")
+        reentry_statement = f"Welcome back! Before we paused, you were discussing '{last_question}'. Let's pick up where we left off."
+    
+    return {
+        "status": "resumed",
+        "reentry_statement": reentry_statement,
+        "snapshot": snapshot,
+        "raw_transcript": session.get("raw_transcript", ""),
+        "script": session.get("script", {})
+    }
+
 
 @app.get("/homework")
 async def get_homework(current_expert_id: str = Depends(get_current_expert_id)):
