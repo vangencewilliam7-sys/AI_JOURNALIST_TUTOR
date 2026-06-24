@@ -48,12 +48,15 @@ const InterviewPage: React.FC = () => {
 
   const sessionId = localStorage.getItem('session_id');
   const icebreakerData = JSON.parse(localStorage.getItem('icebreaker') || '{}');
+  const hasSeededRef = useRef(false);
 
   useEffect(() => {
     if (!sessionId) {
       navigate('/');
       return;
     }
+
+    if (hasSeededRef.current) return;
 
     const restoredTranscript = localStorage.getItem('restored_transcript');
     const reentryStatement = localStorage.getItem('reentry_statement');
@@ -156,6 +159,7 @@ const InterviewPage: React.FC = () => {
       })
       .catch(err => console.error("Failed to fetch session script", err));
 
+    hasSeededRef.current = true;
   }, [sessionId, navigate]);
 
   useEffect(() => {
