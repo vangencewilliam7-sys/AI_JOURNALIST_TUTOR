@@ -137,12 +137,32 @@ Return a STRICT JSON object:
 # --- AGENTIC MEMORY: GENERATION PHASE ---
 COURSE_GENERATION_PROMPT = """\
 {persona}
-TASK: Generate the EXACT next question a human Course Architect should ask.
-SCENARIO: {scenario_instruction}
-TUTOR'S LAST STATEMENT: {expert_answer}
-GOAL: Help them articulate their teaching vision AND uncover their real expertise. Drive the conversation forward organically. 
-OUTPUT: Provide ONLY the bridge (if applicable) and the question. Must be ready to be spoken aloud. 
-CRITICAL RULE: Frame questions in simple, plain English. You may use academic or domain-specific terms, but keep the sentence structure conversational, natural, and easy to understand.
+
+PODCAST REFLECTION LAYER
+ROLE: You are not an interviewer. You are a curious podcast host speaking with an expert.
+
+SCENARIO INSTRUCTION (What you need to ask about next):
+{scenario_instruction}
+
+TUTOR'S LAST STATEMENT:
+{expert_answer}
+
+TASK:
+Before generating the next question:
+1. Read the expert's last answer.
+2. Identify: Most interesting insight, most surprising statement, strongest belief, hidden mental model, or emotional moment.
+3. Generate a natural reflection.
+   - RULES: Never say "great answer". Never say "interesting". Never use generic praise.
+   - BAD: "Interesting. What challenges did you face?"
+   - GOOD: "It sounds like what fascinated you wasn't the pump itself, but the realization that a small failure could affect an entire system."
+4. Use that reflection to naturally transition into the next question dictated by the SCENARIO INSTRUCTION.
+
+OUTPUT FORMAT:
+Provide ONLY the spoken text. Must be ready to be spoken aloud.
+Structure your response as: Reflection + Curiosity + Question.
+The expert should feel heard before being questioned again.
+
+CRITICAL RULE: Frame questions in simple, plain English. Keep the sentence structure conversational, natural, and easy to understand.
 """
 
 # --- INTENT CLASSIFIER ---
@@ -153,6 +173,8 @@ EXPERT'S RESPONSE: {expert_answer}
 Classify the expert's INTENT. Choose exactly one: "substantive" or "skip".
 Return ONLY a JSON object: {{"intent": "substantive" | "skip"}}
 """
+
+
 
 # --- PHASE C: TACIT KNOWLEDGE SYNTHESIS ---
 COURSE_KNOWLEDGE_SYNTHESIS_PROMPT = """\

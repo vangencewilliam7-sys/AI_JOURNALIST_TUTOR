@@ -131,27 +131,9 @@ const InterviewPage: React.FC = () => {
               questions: phase.questions || []
             }));
           setScriptThemes(extractedThemes);
-
-          const restoredSnapshotStr = localStorage.getItem('restored_snapshot');
-          if (restoredSnapshotStr) {
-            try {
-              const restoredSnapshot = JSON.parse(restoredSnapshotStr);
-              if (restoredSnapshot.active_block) {
-                const bIdx = extractedThemes.findIndex(t => t.theme_title === restoredSnapshot.active_block);
-                if (bIdx >= 0) {
-                  setActiveBlockIdx(bIdx);
-                  const qIdx = extractedThemes[bIdx].questions.findIndex((q: any) => q.question_text === restoredSnapshot.current_script_question);
-                  if (qIdx >= 0) setActiveQuestionIdx(qIdx);
-                }
-                setTangentCount(restoredSnapshot.tangent_count || 0);
-              }
-            } catch (e) { console.error("Error parsing snapshot", e); }
-            localStorage.removeItem('restored_snapshot');
-          } else {
-            // Reset pointer to 0,0 whenever a new script loads
-            setActiveBlockIdx(0);
-            setActiveQuestionIdx(0);
-          }
+          // Reset pointer to 0,0 whenever a new script loads
+          setActiveBlockIdx(0);
+          setActiveQuestionIdx(0);
         }
       })
       .catch(err => console.error("Failed to fetch session script", err));

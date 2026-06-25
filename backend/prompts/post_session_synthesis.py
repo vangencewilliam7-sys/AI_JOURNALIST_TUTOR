@@ -222,10 +222,10 @@ Analysis:
 OUTPUT RULES:
 - Only extract tasks for actual resources mentioned (books, courses, videos, mentors, docs) or bold operational claims.
 - Rank them by priority. CRITICAL means it is foundational to the curriculum.
-- Output STRICTLY in the following JSON format using the key `knowledge_gaps` to map directly to the database column.
+- Output STRICTLY in the following JSON format using the key `ai_open_loops` to map directly to the database column.
 
 {{
-  "knowledge_gaps": [
+  "ai_open_loops": [
     {{
       "type": "resource_check | operational_claim",
       "topic": "The core topic being discussed.",
