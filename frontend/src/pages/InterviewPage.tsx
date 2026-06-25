@@ -74,24 +74,50 @@ const InterviewPage: React.FC = () => {
       .then(res => res.json())
       .then(data => {
         if (data.status === 'success' && data.session?.script) {
-          const arc = data.session.script.interview_arc || data.session.script;
-          // Sort entries by block number to guarantee correct display order (block_1 → block_2 → … → block_5)
-          // Object.entries() does NOT guarantee insertion order on plain objects, so we sort explicitly.
-          const extractedThemes = Object.entries(arc || {})
-            .sort(([keyA], [keyB]) => {
-              // Extract the leading number from keys like "block_1_origin", "block_2_learning_journey", etc.
-              const numA = parseInt(keyA.match(/\d+/)?.[0] ?? '0', 10);
-              const numB = parseInt(keyB.match(/\d+/)?.[0] ?? '0', 10);
-              return numA - numB;
-            })
-            .map(([key, phase]: [string, any], idx) => ({
+          let scriptData = data.session.script;
+          if (typeof scriptData === 'string') {
+            try { scriptData = JSON.parse(scriptData); } catch(e) { console.error("Failed to parse script string"); }
+          }
+          
+          let extractedThemes: any[] = [];
+          if (scriptData.topic_backlog) {
+            extractedThemes = scriptData.topic_backlog.map((block: any, idx: number) => ({
               theme_id: idx,
-              theme_title: key.replace('block_', 'Block ').replace(/_/g, ' '),
-              editorial_rationale: phase.goal || "Phase goal",
-              tentative_duration: phase.tentative_duration_minutes || 20,
-              questions: phase.questions || []
+              theme_title: block.topic_title || `Block ${idx+1}`,
+              editorial_rationale: block.target_knowledge_types?.join(', ') || "Phase goal",
+              tentative_duration: block.estimated_minutes || 20,
+              questions: [{ id: "opener", question_text: block.opener_question }]
             }));
-          setScriptThemes(extractedThemes);
+          } else {
+            const arc = scriptData.interview_arc || scriptData;
+            // Sort entries by block number to guarantee correct display order (block_1 → block_2 → … → block_5)
+            // Object.entries() does NOT guarantee insertion order on plain objects, so we sort explicitly.
+            extractedThemes = Object.entries(arc || {})
+              .sort(([keyA], [keyB]) => {
+                // Extract the leading number from keys like "block_1_origin", "block_2_learning_journey", etc.
+                const numA = parseInt(keyA.match(/\d+/)?.[0] ?? '0', 10);
+                const numB = parseInt(keyB.match(/\d+/)?.[0] ?? '0', 10);
+                return numA - numB;
+              })
+              .map(([key, phase]: [string, any], idx) => ({
+                theme_id: idx,
+                theme_title: key.replace('block_', 'Block ').replace(/_/g, ' '),
+                editorial_rationale: phase.goal || "Phase goal",
+                tentative_duration: phase.tentative_duration_minutes || 20,
+                questions: phase.questions || []
+              }));
+          }
+          if (extractedThemes.length === 0) {
+            setScriptThemes([{ 
+              theme_id: -1, 
+              theme_title: "Debug: Empty Themes", 
+              editorial_rationale: "Debug info",
+              tentative_duration: 0, 
+              questions: [{ id: "err", question_text: JSON.stringify(scriptData).substring(0, 500) }] 
+            }]);
+          } else {
+            setScriptThemes(extractedThemes);
+          }
           // Reset pointer to 0,0 whenever a new script loads
           setActiveBlockIdx(0);
           setActiveQuestionIdx(0);

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { BrainCircuit, Play, Cpu, Eye, Target, Database, FileText, MessageSquare, GitBranch, Activity, Sparkles, CheckCircle, Loader2, User, Mic } from 'lucide-react';
+import { BrainCircuit, Play, Cpu, Eye, Database, FileText, Activity, Sparkles, CheckCircle, Loader2, User, Mic } from 'lucide-react';
 
 const ScriptPage: React.FC = () => {
   const navigate = useNavigate();
@@ -50,18 +50,28 @@ const ScriptPage: React.FC = () => {
           setScript({
             opening_icebreaker: icebreakerData.opening_icebreaker || "Welcome to the studio.",
             active_listening_cues: icebreakerData.active_listening_cues || "Listen carefully.",
-            interview_arc: arc
+            interview_arc: arc,
+            topic_backlog: data.script.topic_backlog
           });
 
-          // The current backend script generator focuses on phases rather than distinct themes, 
-          // so we map phase goals to themes for the UI sidebar
-          const extractedThemes = Object.entries(arc || {}).map(([key, phase]: [string, any], idx) => ({
-            theme_id: idx,
-            theme_title: key.replace('block_', 'Block ').replace(/_/g, ' '),
-            editorial_rationale: phase.goal || "Phase goal",
-            tentative_duration: phase.tentative_duration_minutes || 20,
-            questions: phase.questions || []
-          }));
+          let extractedThemes: any[] = [];
+          if (data.script.topic_backlog) {
+            extractedThemes = data.script.topic_backlog.map((block: any, idx: number) => ({
+              theme_id: idx,
+              theme_title: block.topic_title || `Block ${idx+1}`,
+              editorial_rationale: block.target_knowledge_types?.join(', ') || "Phase goal",
+              tentative_duration: block.estimated_minutes || 20,
+              questions: [{ id: "opener", question_text: block.opener_question }]
+            }));
+          } else {
+            extractedThemes = Object.entries(arc || {}).map(([key, phase]: [string, any], idx) => ({
+              theme_id: idx,
+              theme_title: key.replace('block_', 'Block ').replace(/_/g, ' '),
+              editorial_rationale: phase.goal || "Phase goal",
+              tentative_duration: phase.tentative_duration_minutes || 20,
+              questions: phase.questions || []
+            }));
+          }
           setThemes(extractedThemes);
           
           setTimeout(() => setResearchStep(4), 800);
@@ -121,9 +131,11 @@ const ScriptPage: React.FC = () => {
     );
   }
 
-  const totalQuestions = Object.values(script?.interview_arc || {}).reduce(
-    (sum: number, phase: any) => sum + (phase.questions?.length || 0), 0
-  );
+  const totalQuestions = script?.topic_backlog 
+    ? script.topic_backlog.length
+    : Object.values(script?.interview_arc || {}).reduce(
+        (sum: number, phase: any) => sum + (phase.questions?.length || 0), 0
+      );
 
   return (
     <div className="script-page">
@@ -219,35 +231,73 @@ const ScriptPage: React.FC = () => {
             })}
           </aside>
           <div className="script-main">
-            <div className="section-label"><div className="section-label-dot" /> Full Narrative Script ({totalQuestions} questions)</div>
-            {Object.entries(script?.interview_arc || {}).map(([key, phase]: [string, any]) => (
-              <div key={key} className="phase-block">
-                <div className="phase-header">
-                  <h4>{key.replace('block_', 'Block ').replace(/_/g, ' ')} <span style={{fontSize:'12px', marginLeft:'8px', color:'var(--accent)'}}>({phase.tentative_duration_minutes || 20}m)</span></h4>
-                  {phase.goal && <small>{phase.goal}</small>}
-                </div>
-                {phase.questions?.map((q: any) => {
-                  const qId = q.question_id || q.id;
-                  const isQOpen = expandedQuestions.has(qId);
+            {script?.topic_backlog ? (
+              <>
+                <div className="section-label"><div className="section-label-dot" /> Topic Backlog ({script.topic_backlog.length} blocks)</div>
+                {script.topic_backlog.map((block: any, idx: number) => {
+                  const blockId = block.block_id || `block_${idx}`;
+                  const isQOpen = expandedQuestions.has(blockId);
                   return (
-                    <div key={qId} className={`question-card ${isQOpen ? 'question-expanded' : ''}`}>
-                      <div className="question-top-row">
-                        <div className="question-id">{qId}</div>
-                        <div className="question-content"><p>"{q.question_text}"</p></div>
+                    <div key={blockId} className="phase-block">
+                      <div className="phase-header">
+                        <h4>{block.topic_title} <span style={{fontSize:'12px', marginLeft:'8px', color:'var(--accent)'}}>({block.estimated_minutes || 20}m)</span></h4>
+                        <small>Target Knowledge: {block.target_knowledge_types?.join(', ')}</small>
                       </div>
-                      <button className="question-rationale-btn" onClick={() => toggleQuestion(qId)}>
-                        <Eye size={11} /> {isQOpen ? 'Hide' : 'Why this question?'}
-                      </button>
-                      {isQOpen && (
-                        <div className="question-rationale-panel">
-                          <p>{q.rationale}</p>
+                      
+                      <div className={`question-card ${isQOpen ? 'question-expanded' : ''}`}>
+                        <div className="question-top-row">
+                          <div className="question-id">OPENER</div>
+                          <div className="question-content"><p>"{block.opener_question}"</p></div>
                         </div>
-                      )}
+                        <button className="question-rationale-btn" onClick={() => toggleQuestion(blockId)}>
+                          <Eye size={11} /> {isQOpen ? 'Hide' : 'View Exploration Vectors'}
+                        </button>
+                        {isQOpen && (
+                          <div className="question-rationale-panel">
+                            <p style={{marginBottom: '8px', fontSize: '13px', fontWeight: 600}}>Exploration Vectors:</p>
+                            <ul style={{margin: 0, paddingLeft: '20px', fontSize: '13px'}}>
+                              {block.exploration_vectors?.map((v: string, i: number) => <li key={i} style={{marginBottom: '4px'}}>{v}</li>)}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
-              </div>
-            ))}
+              </>
+            ) : (
+              <>
+                <div className="section-label"><div className="section-label-dot" /> Full Narrative Script ({totalQuestions} questions)</div>
+                {Object.entries(script?.interview_arc || {}).map(([key, phase]: [string, any]) => (
+                  <div key={key} className="phase-block">
+                    <div className="phase-header">
+                      <h4>{key.replace('block_', 'Block ').replace(/_/g, ' ')} <span style={{fontSize:'12px', marginLeft:'8px', color:'var(--accent)'}}>({phase.tentative_duration_minutes || 20}m)</span></h4>
+                      {phase.goal && <small>{phase.goal}</small>}
+                    </div>
+                    {phase.questions?.map((q: any) => {
+                      const qId = q.question_id || q.id;
+                      const isQOpen = expandedQuestions.has(qId);
+                      return (
+                        <div key={qId} className={`question-card ${isQOpen ? 'question-expanded' : ''}`}>
+                          <div className="question-top-row">
+                            <div className="question-id">{qId}</div>
+                            <div className="question-content"><p>"{q.question_text}"</p></div>
+                          </div>
+                          <button className="question-rationale-btn" onClick={() => toggleQuestion(qId)}>
+                            <Eye size={11} /> {isQOpen ? 'Hide' : 'Why this question?'}
+                          </button>
+                          {isQOpen && (
+                            <div className="question-rationale-panel">
+                              <p>{q.rationale}</p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </>
+            )}
           </div>
         </div>
       </div>
