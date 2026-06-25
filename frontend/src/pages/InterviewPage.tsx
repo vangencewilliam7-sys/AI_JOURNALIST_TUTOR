@@ -16,6 +16,40 @@ interface Message {
   };
 }
 
+// Helper to parse transcript strings into Message objects
+const parseTranscriptToMessages = (transcript: string, reentryStatement?: string): Message[] => {
+  const parsedMessages: Message[] = [];
+  const lines = transcript.split('\n');
+  let currentRole: 'ai' | 'expert' = 'ai';
+  let currentText = '';
+  for (const line of lines) {
+    if (line.startsWith('[AI JOURNALIST]: ')) {
+      if (currentText) parsedMessages.push({ id: Math.random().toString(), role: currentRole, text: currentText.trim(), timestamp: Date.now() });
+      currentRole = 'ai';
+      currentText = line.substring(17) + '\n';
+    } else if (line.startsWith('[EXPERT]: ')) {
+      if (currentText) parsedMessages.push({ id: Math.random().toString(), role: currentRole, text: currentText.trim(), timestamp: Date.now() });
+      currentRole = 'expert';
+      currentText = line.substring(10) + '\n';
+    } else if (line.startsWith('[SCRIPT]: ')) {
+      // Ignore script stamping lines
+    } else {
+      currentText += line + '\n';
+    }
+  }
+  if (currentText.trim()) parsedMessages.push({ id: Math.random().toString(), role: currentRole, text: currentText.trim(), timestamp: Date.now() });
+
+  if (reentryStatement) {
+    parsedMessages.push({
+      id: 'reentry',
+      role: 'ai',
+      text: reentryStatement,
+      timestamp: Date.now(),
+      decision: { intent_classification: 're_entry', internal_reasoning: 'Resumed session.', action: 'continue' }
+    });
+  }
+  return parsedMessages;
+};
 // ─── 2D pointer position returned by advanceTeleprompter ─────────────────────
 interface Pointer {
   blockIdx: number;
@@ -62,40 +96,11 @@ const InterviewPage: React.FC = () => {
     const reentryStatement = localStorage.getItem('reentry_statement');
 
     if (restoredTranscript && reentryStatement) {
-      const parsedMessages: Message[] = [];
-      const lines = restoredTranscript.split('\n');
-      let currentRole: 'ai' | 'expert' = 'ai';
-      let currentText = '';
-      for (const line of lines) {
-        if (line.startsWith('[AI JOURNALIST]: ')) {
-          if (currentText) parsedMessages.push({ id: Math.random().toString(), role: currentRole, text: currentText.trim(), timestamp: Date.now() });
-          currentRole = 'ai';
-          currentText = line.substring(17) + '\n';
-        } else if (line.startsWith('[EXPERT]: ')) {
-          if (currentText) parsedMessages.push({ id: Math.random().toString(), role: currentRole, text: currentText.trim(), timestamp: Date.now() });
-          currentRole = 'expert';
-          currentText = line.substring(10) + '\n';
-        } else if (line.startsWith('[SCRIPT]: ')) {
-          // Ignore script stamping lines
-        } else {
-          currentText += line + '\n';
-        }
-      }
-      if (currentText.trim()) parsedMessages.push({ id: Math.random().toString(), role: currentRole, text: currentText.trim(), timestamp: Date.now() });
-
-      parsedMessages.push({
-        id: 'reentry',
-        role: 'ai',
-        text: reentryStatement,
-        timestamp: Date.now(),
-        decision: { intent_classification: 're_entry', internal_reasoning: 'Resumed session. Generating contextual re-entry.', action: 'continue' }
-      });
-
-      setMessages(parsedMessages);
+      setMessages(parseTranscriptToMessages(restoredTranscript, reentryStatement));
       localStorage.removeItem('restored_transcript');
       localStorage.removeItem('reentry_statement');
     } else {
-      // Seed the conversation with a generic opening
+      // Seed the conversation with a generic opening temporarily, it will be overwritten if DB has history
       setMessages([
         {
           id: '1',
@@ -110,6 +115,8 @@ const InterviewPage: React.FC = () => {
         }
       ]);
     }
+    
+    hasSeededRef.current = true;
 
     // Fetch the script data for the sidebar
     fetch(`http://localhost:9120/session/${sessionId}`, { headers: { 'Authorization': `Bearer ${session?.access_token}` } })
@@ -135,23 +142,34 @@ const InterviewPage: React.FC = () => {
             }));
           setScriptThemes(extractedThemes);
 
+          const dbTranscript = data.session.raw_transcript;
+          const dbSnapshot = data.session.snapshot;
+
+          // If we didn't just resume (restoredTranscript is null) but the DB actually has a chat history, load it!
+          if (!restoredTranscript && dbTranscript && dbTranscript.includes('[EXPERT]:')) {
+            setMessages(parseTranscriptToMessages(dbTranscript));
+          }
+
           const restoredSnapshotStr = localStorage.getItem('restored_snapshot');
+          let finalSnapshot = dbSnapshot;
+          
           if (restoredSnapshotStr) {
             try {
-              const restoredSnapshot = JSON.parse(restoredSnapshotStr);
-              if (restoredSnapshot.active_block) {
-                const bIdx = extractedThemes.findIndex(t => t.theme_title === restoredSnapshot.active_block);
-                if (bIdx >= 0) {
-                  setActiveBlockIdx(bIdx);
-                  const qIdx = extractedThemes[bIdx].questions.findIndex((q: any) => q.question_text === restoredSnapshot.current_script_question);
-                  if (qIdx >= 0) setActiveQuestionIdx(qIdx);
-                }
-                setTangentCount(restoredSnapshot.tangent_count || 0);
-              }
+              finalSnapshot = JSON.parse(restoredSnapshotStr);
             } catch (e) { console.error("Error parsing snapshot", e); }
             localStorage.removeItem('restored_snapshot');
+          }
+
+          if (finalSnapshot && finalSnapshot.active_block) {
+            const bIdx = extractedThemes.findIndex(t => t.theme_title === finalSnapshot.active_block);
+            if (bIdx >= 0) {
+              setActiveBlockIdx(bIdx);
+              const qIdx = extractedThemes[bIdx].questions.findIndex((q: any) => q.question_text === finalSnapshot.current_script_question);
+              if (qIdx >= 0) setActiveQuestionIdx(qIdx);
+            }
+            setTangentCount(finalSnapshot.tangent_count || 0);
           } else {
-            // Reset pointer to 0,0 whenever a new script loads
+            // Reset pointer to 0,0 whenever a new script loads and no snapshot exists
             setActiveBlockIdx(0);
             setActiveQuestionIdx(0);
           }

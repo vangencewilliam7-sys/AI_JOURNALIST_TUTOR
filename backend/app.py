@@ -359,14 +359,30 @@ async def resume_session_endpoint(session_id: str, current_expert_id: str = Depe
     }).eq("id", session_id).execute()
     
     # Generate contextual re-entry statement
+    raw_transcript = session.get("raw_transcript", "")
     last_question = snapshot.get("current_script_question", "We were discussing your expertise.")
     
+    # Extract the true last question the AI asked from the transcript
+    if raw_transcript:
+        parts = raw_transcript.split("[AI JOURNALIST]:")
+        if len(parts) > 1:
+            last_ai_part = parts[-1].split("[EXPERT]:")[0].strip()
+            if last_ai_part:
+                last_question = last_ai_part
+
+    # Provide recent context for the summary, limit to 4000 chars to avoid prompt bloat
+    transcript_context = raw_transcript[-4000:] if raw_transcript else "No prior conversation history."
+
     system_prompt = (
         "You are an expert journalist. The user has just returned from a break and resumed the interview session.\n"
-        "Your task is to generate a very brief, friendly 'Welcome back' re-entry statement.\n"
-        f"You MUST acknowledge that before the break, you were asking about: '{last_question}'\n"
-        "End your statement by asking them to continue or re-asking the question.\n"
-        "Keep it under 3 sentences."
+        "Your task is to generate a natural, conversational 'Welcome back' re-entry statement.\n"
+        "Do NOT use any markdown formatting, bullet points, numbers, or bold text. Just plain text.\n\n"
+        "Your response MUST be separated into exactly 3 paragraphs (separated by blank lines):\n"
+        "Paragraph 1: A brief, friendly greeting (e.g., 'Welcome back!').\n"
+        "Paragraph 2: A 1-2 sentence summary of what the expert was discussing recently (based on the transcript context provided below).\n"
+        f"Paragraph 3: Re-ask this exact question word-for-word: '{last_question}'\n\n"
+        "Here is the recent transcript context for you to summarize:\n"
+        f"{transcript_context}"
     )
     
     try:
