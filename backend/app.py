@@ -118,6 +118,15 @@ class PauseSessionRequest(BaseModel):
     active_block: str
     tangent_count: int
 
+class SubmitEvidenceRequest(BaseModel):
+    session_id: str
+    iteration_number: int
+    loop_topic: str
+    material_type: str
+    content_or_url: str
+    resource_mentioned: Optional[str] = ""
+    what_expert_claimed: Optional[str] = ""
+
 # ============================================================
 # PHASE 2: INTAKE & SCRIPT GENERATION
 # ============================================================
@@ -126,10 +135,23 @@ class PauseSessionRequest(BaseModel):
 async def intake_endpoint(request: ExpertIntakeRequest, current_expert_id: str = Depends(get_current_expert_id)):
     """Phase 2: Save expert profile and generate Day 1 Icebreaker."""
     try:
+        # Fetch existing expert row or auth metadata to preserve name if not provided in request
+        existing_expert = supabase.table("experts").select("name").eq("id", current_expert_id).execute()
+        auth_user_name = None
+        try:
+            auth_res = supabase.auth.admin.get_user_by_id(current_expert_id)
+            if auth_res and auth_res.user:
+                meta = auth_res.user.user_metadata or {}
+                auth_user_name = meta.get("name") or (auth_res.user.email.split("@")[0] if auth_res.user.email else None)
+        except Exception:
+            pass
+
+        expert_name = request.name or (existing_expert.data[0]["name"] if existing_expert.data and existing_expert.data[0].get("name") else auth_user_name) or "Expert"
+
         # Upsert Expert (handle case where row might not have been created by Auth Trigger)
         expert_res = supabase.table("experts").upsert({
             "id": current_expert_id,
-            "name": request.name or "Expert",
+            "name": expert_name,
             "domain": request.domain,
             "stream_type": request.stream_type,
             "course_title": request.course_title,
@@ -149,7 +171,7 @@ async def intake_endpoint(request: ExpertIntakeRequest, current_expert_id: str =
         # Create a dedicated knowledge source for this session's vector embeddings
         source_res = supabase.table("knowledge_sources").insert({
             "source_type": "transcript",
-            "title": f"Live Interview - {request.name} - Iteration 1",
+            "title": f"Live Interview - {expert_name} - Iteration 1",
             "global_summary": "Auto-generated vector memory for live interview session.",
             "author_or_channel": "AI Journalist"
         }).execute()
@@ -274,14 +296,15 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
 @app.post("/end-session/{session_id}")
 async def end_session_endpoint(session_id: str, current_expert_id: str = Depends(get_current_expert_id)):
-    """Phase 4 & 5: Run extraction on full transcript and generate open loops."""
+    """Phase 4 & 5: Run extraction on full transcript, generate open loops, and auto-create Part 2."""
     try:
-        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", session_id).execute()
+        session_res = supabase.table("interview_sessions").select("*").eq("id", session_id).execute()
         if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
             raise HTTPException(status_code=403, detail="Not authorized")
 
-        # Mark ended_at
+        # Mark ended_at and update status to completed
         supabase.table("interview_sessions").update({
+            "status": "completed",
             "ended_at": datetime.now(timezone.utc).isoformat()
         }).eq("id", session_id).execute()
 
@@ -291,11 +314,37 @@ async def end_session_endpoint(session_id: str, current_expert_id: str = Depends
         # Run Homework Generator (Phase 5)
         hw_result = await interview_domain.generate_homework(session_id)
         
+        # Auto-create Session Part 2
+        prior_session = session_res.data[0]
+        next_iter = prior_session.get("iteration_number", 1) + 1
+        expert_res = supabase.table("experts").select("name").eq("id", current_expert_id).execute()
+        expert_name = expert_res.data[0]["name"] if expert_res.data else "Expert"
+
+        source_res = supabase.table("knowledge_sources").insert({
+            "source_type": "transcript",
+            "title": f"Live Interview - {expert_name} - Iteration {next_iter}",
+            "global_summary": "Auto-generated vector memory for live interview session part 2.",
+            "author_or_channel": "AI Journalist"
+        }).execute()
+        source_id = source_res.data[0]["id"]
+
+        next_sess_res = supabase.table("interview_sessions").insert({
+            "expert_id": current_expert_id,
+            "iteration_number": next_iter,
+            "status": "paused",
+            "live_transcript_source_id": source_id,
+            "script": prior_session.get("script"),
+            "current_block": prior_session.get("current_block") or "Block 1",
+            "snapshot": prior_session.get("snapshot") or {}
+        }).execute()
+        next_session_id = next_sess_res.data[0]["id"] if next_sess_res.data else None
+
         return {
             "status": "success",
-            "message": "Session synthesized and homework generated.",
+            "message": "Session synthesized and next chapter prepared.",
             "synthesis": synth_result["session_synthesis"],
-            "homework": hw_result["homework"]
+            "homework": hw_result["homework"],
+            "next_session_id": next_session_id
         }
     except Exception as e:
         logger.error(f"End session error: {e}")
@@ -309,9 +358,10 @@ async def end_session_endpoint(session_id: str, current_expert_id: str = Depends
 async def get_active_session(current_expert_id: str = Depends(get_current_expert_id)):
     """Finds the most recent paused or active session for auto-resume after login."""
     res = supabase.table("interview_sessions")\
-        .select("id, status, script, raw_transcript, snapshot")\
+        .select("id, status, script, raw_transcript, snapshot, iteration_number")\
         .eq("expert_id", current_expert_id)\
         .in_("status", ["active", "paused"])\
+        .order("iteration_number", desc=True)\
         .order("created_at", desc=True)\
         .limit(1)\
         .execute()
@@ -429,6 +479,37 @@ async def put_homework(homework_id: str, request: HomeworkPutRequest, current_ex
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/homework/submit-evidence")
+async def submit_evidence_endpoint(request: SubmitEvidenceRequest, background_tasks: BackgroundTasks, current_expert_id: str = Depends(get_current_expert_id)):
+    result = await interview_domain.submit_evidence(
+        expert_id=current_expert_id,
+        session_id=request.session_id,
+        iteration_number=request.iteration_number,
+        loop_topic=request.loop_topic,
+        material_type=request.material_type,
+        content_or_url=request.content_or_url,
+        resource_mentioned=request.resource_mentioned or "",
+        what_expert_claimed=request.what_expert_claimed or ""
+    )
+    background_tasks.add_task(
+        interview_domain.background_verify_evidence,
+        result["material_id"],
+        request.loop_topic,
+        request.material_type,
+        request.content_or_url,
+        request.resource_mentioned or "",
+        request.what_expert_claimed or ""
+    )
+    return result
+
+@app.get("/homework/verification-status/{session_id}")
+async def get_verification_status(session_id: str, current_expert_id: str = Depends(get_current_expert_id)):
+    try:
+        res = supabase.table("submitted_materials").select("*").eq("session_id", session_id).execute()
+        return {"status": "success", "materials": res.data or []}
+    except Exception:
+        return {"status": "success", "materials": []}
 
 # ============================================================
 # PHASE 6: FLYWHEEL BRIDGE

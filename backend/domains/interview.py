@@ -239,6 +239,33 @@ class InterviewDomain(BaseDomain):
         )
         # ─────────────────────────────────────────────────────────────────────
 
+        # ── DYNAMIC SESSION BOUNDARY ENGINE ───────────────────────────────────
+        sat_pct, turn_count, sat_reason = self._compute_session_saturation(new_transcript, final_scratchpad)
+        grace_phrases = ["let me finish", "one more thing", "hold on", "almost finished", "wait", "also", "and finally", "let me explain", "continue"]
+        requested_grace = any(gp in expert_answer.lower() for gp in grace_phrases)
+
+        if sat_pct >= 90:
+            if requested_grace:
+                logger.info(f"Dynamic Session Boundary: Grace period granted at {sat_pct}% saturation.")
+                pacing_warning = f"\n[GRACE PERIOD GRANTED]: The expert asked to finish their thought ({sat_pct}% saturation). Allow 1 final follow-up, then conclude."
+            else:
+                logger.info(f"Dynamic Session Boundary reached ({sat_pct}%, Turns={turn_count}). Auto-pausing session.")
+                closing_msg = "That is a brilliant insight to conclude this chapter on. Let me pause here to synthesize our notes and prepare the next section!"
+                self.supabase.table("interview_sessions").update(
+                    {"raw_transcript": new_transcript + f"\n\n[AI JOURNALIST]: {closing_msg}"}
+                ).eq("id", session_id).execute()
+                return {
+                    "question": closing_msg,
+                    "decision": {
+                        "action": "system_auto_pause",
+                        "intent": "dynamic_session_limit_reached",
+                        "reasoning": f"Dynamic Session Saturation Reached ({sat_pct}%). {sat_reason}."
+                    }
+                }
+        elif sat_pct >= 70:
+            pacing_warning += f"\n[SESSION PACING NOTICE]: Session saturation is reaching optimal capacity ({sat_pct}%). Begin steering the expert toward wrapping up their current train of thought."
+        # ─────────────────────────────────────────────────────────────────────
+
         # ── FIX 2.4 — Retrieval Gate with objective-anchored embedding ────────
         gate_res = self.llm_fast.invoke(RETRIEVAL_GATE_PROMPT.format(
             active_script_question=current_script_question,
@@ -328,6 +355,20 @@ class InterviewDomain(BaseDomain):
 
                     # ONLY force skip if confidence is high AND it was the absolute last objective left in this block
                     if sat_confidence >= 0.80 and len(missing_objectives) <= 1:
+                        if locals().get("sat_pct", 0) >= 70:
+                            logger.info("Block objectives complete at >=70% saturation! Auto-pausing session.")
+                            closing_msg = f"That completely resolves '{active_block}'. Let's pause here to synthesize chapter notes before diving into the next section!"
+                            self.supabase.table("interview_sessions").update(
+                                {"raw_transcript": new_transcript + f"\n\n[AI JOURNALIST]: {closing_msg}"}
+                            ).eq("id", session_id).execute()
+                            return {
+                                "question": closing_msg,
+                                "decision": {
+                                    "action": "system_auto_pause",
+                                    "intent": "block_and_session_complete",
+                                    "reasoning": f"Block objectives complete at {locals().get('sat_pct')}% saturation. Auto-pausing session."
+                                }
+                            }
                         logger.info("All objectives satisfied with high confidence! Forcing skip to next block.")
                         self.supabase.table("interview_sessions").update(
                             {"raw_transcript": new_transcript}
@@ -553,6 +594,29 @@ THREADS:
                 logger.warning(f"Could not persist current_block (column may not exist yet): {e}")
 
         return requested_block
+
+    def _compute_session_saturation(self, transcript: str, scratchpad: dict = None) -> Tuple[int, int, str]:
+        """
+        Computes real-time session saturation (0-100%) based on token weight, turn count, and satisfied objectives.
+        """
+        if not transcript:
+            return 0, 0, "Empty transcript"
+            
+        expert_turns = [l for l in transcript.split("\n") if l.strip().startswith("[EXPERT]:")]
+        turn_count = len(expert_turns)
+        
+        # 1. Token pressure: optimal chapter session ceiling = 8,000 chars (~2,000 tokens / ~10 rich Q&As)
+        token_pressure = min(1.0, len(transcript) / 8000.0)
+        
+        # 2. Objectives complete rate (target 4 objectives per chapter block)
+        sat_objs = (scratchpad or {}).get("satisfied_objectives", [])
+        obj_rate = min(1.0, len(sat_objs) / 4.0)
+        
+        # Dynamic Saturation: Whichever vector is highest drives the session boundary
+        composite = (0.65 * token_pressure) + (0.50 * obj_rate)
+        score = min(1.0, max(token_pressure, obj_rate, composite))
+        sat_pct = int(score * 100)
+        return sat_pct, turn_count, f"Tokens={int(len(transcript)/4)}, Objs={len(sat_objs)}, Sat={sat_pct}%"
 
     def _compute_phase_objectives(self, active_block: str, transcript: str, current_scratchpad: dict = None) -> Tuple[str, List[str]]:
         """
@@ -1043,3 +1107,129 @@ THREADS:
         bridge_data = json.loads(cl)
         
         return bridge_data
+
+# =====================================================================
+# PHASE 6+ — BACKGROUND VERIFICATION ENGINE & EVIDENCE CROSS-REFERENCING
+# =====================================================================
+
+EVIDENCE_VERIFICATION_PROMPT = """You are the AI Journalist Background Verification Engine.
+An expert previously claimed the following during an interview session:
+CLAIM / TOPIC: {loop_topic}
+RESOURCE MENTIONED: {resource_mentioned}
+WHAT EXPERT CLAIMED: {what_expert_claimed}
+
+The expert has now submitted supporting evidence ({material_type}):
+SUBMITTED CONTENT / EXTRACT:
+{content_or_url}
+
+Your task is to analyze the submitted evidence against the expert's prior claim.
+Return valid JSON matching this exact structure:
+{{
+  "verification_status": "verified",
+  "authenticity_score": 0.95,
+  "key_findings": ["Finding 1", "Finding 2"],
+  "inconsistencies_or_gaps": ["Any gaps or contradictions spotted"],
+  "suggested_followup_probe": "A sharp, evidence-backed question to ask the expert in the next session"
+}}
+Note: "verification_status" must be one of: "verified", "inconsistent", or "needs_review".
+Return ONLY valid JSON.
+"""
+
+VERIFICATION_QUESTION_PROMPT = """You are the AI Journalist.
+The expert submitted supporting evidence for several open loops between interview sessions.
+Our Background Verification Engine analyzed the evidence and generated these verification insights:
+{verification_insights_json}
+
+Your task is to generate 1 to 2 sharp, highly contextual follow-up verification questions to present to the expert before or during the next interview phase.
+These questions should validate their learning journey, explore any gaps/inconsistencies, or solidify their tacit knowledge blueprint.
+
+Return valid JSON:
+{{
+  "verification_questions": [
+    {{
+      "question_text": "...",
+      "target_topic": "...",
+      "rationale": "..."
+    }}
+  ]
+}}
+Return ONLY valid JSON.
+"""
+
+# Monkey-patching additional methods onto InterviewDomain
+async def _submit_evidence_method(self, expert_id: str, session_id: str, iteration_number: int, loop_topic: str, material_type: str, content_or_url: str, resource_mentioned: str = "", what_expert_claimed: str = "") -> Dict[str, Any]:
+    # Insert record into submitted_materials table (handle fallback if table not created)
+    try:
+        mat_res = self.supabase.table("submitted_materials").insert({
+            "expert_id": expert_id,
+            "session_id": session_id,
+            "iteration_number": iteration_number,
+            "loop_topic": loop_topic,
+            "material_type": material_type,
+            "content_or_url": content_or_url,
+            "verification_status": "verifying"
+        }).execute()
+        mat_id = mat_res.data[0]["id"] if mat_res.data else "MAT-" + str(int(datetime.now().timestamp()))
+    except Exception as e:
+        logger.warning(f"submitted_materials table missing or error: {e}")
+        mat_id = "MAT-DEMO-" + str(int(datetime.now().timestamp()))
+
+    return {
+        "status": "received",
+        "material_id": mat_id,
+        "loop_topic": loop_topic,
+        "resource_mentioned": resource_mentioned,
+        "what_expert_claimed": what_expert_claimed
+    }
+
+async def _background_verify_evidence_method(self, material_id: str, loop_topic: str, material_type: str, content_or_url: str, resource_mentioned: str, what_expert_claimed: str):
+    logger.info(f"Background Verification Engine running for evidence: {material_id}")
+    try:
+        res = self.llm.invoke(EVIDENCE_VERIFICATION_PROMPT.format(
+            loop_topic=loop_topic,
+            resource_mentioned=resource_mentioned,
+            what_expert_claimed=what_expert_claimed,
+            material_type=material_type,
+            content_or_url=content_or_url[:3000]
+        ))
+        cl = res.content.strip()
+        if "```json" in cl: cl = cl.split("```json")[1].split("```")[0].strip()
+        insights = json.loads(cl)
+
+        status = insights.get("verification_status", "verified")
+        try:
+            self.supabase.table("submitted_materials").update({
+                "verification_status": status,
+                "verification_insights": insights
+            }).eq("id", material_id).execute()
+        except Exception:
+            pass
+        logger.info(f"Evidence {material_id} verified with status: {status}")
+    except Exception as e:
+        logger.error(f"Background verification failed for {material_id}: {e}")
+
+async def _generate_verification_questions_method(self, expert_id: str) -> List[Dict[str, Any]]:
+    try:
+        mats_res = self.supabase.table("submitted_materials").select("*").eq("expert_id", expert_id).neq("verification_status", "pending").execute()
+        if not mats_res.data:
+            return []
+        
+        insights_list = [m.get("verification_insights", {}) for m in mats_res.data if m.get("verification_insights")]
+        if not insights_list:
+            return []
+
+        res = self.llm.invoke(VERIFICATION_QUESTION_PROMPT.format(
+            verification_insights_json=json.dumps(insights_list, indent=2)
+        ))
+        cl = res.content.strip()
+        if "```json" in cl: cl = cl.split("```json")[1].split("```")[0].strip()
+        data = json.loads(cl)
+        return data.get("verification_questions", [])
+    except Exception as e:
+        logger.error(f"Verification question generation error: {e}")
+        return []
+
+InterviewDomain.submit_evidence = _submit_evidence_method
+InterviewDomain.background_verify_evidence = _background_verify_evidence_method
+InterviewDomain.generate_verification_questions = _generate_verification_questions_method
+

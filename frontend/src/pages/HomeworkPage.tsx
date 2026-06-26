@@ -5,6 +5,66 @@ import { RefreshCw, PenTool, BrainCircuit, Mic, AlertTriangle, Eye, Loader2, Che
 
 const API_BASE_URL = 'http://localhost:9120';
 
+const EvidenceSubmissionCard: React.FC<{ item: any; expertId: string; sessionId: string }> = ({ item, expertId, sessionId }) => {
+  const [tab, setTab] = useState<'url' | 'file' | 'notes'>('url');
+  const [inputVal, setInputVal] = useState('');
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'verifying' | 'done'>('idle');
+
+  const handleSubmit = async () => {
+    if (!inputVal) return;
+    setStatus('submitting');
+    try {
+      await fetch('http://localhost:9120/homework/submit-evidence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId || 'SESS-1',
+          iteration_number: 1,
+          loop_topic: item.topic || 'General Claim',
+          material_type: tab === 'url' ? 'url' : tab === 'file' ? 'file' : 'text_description',
+          content_or_url: inputVal,
+          resource_mentioned: item.resource_mentioned || '',
+          what_expert_claimed: item.what_expert_claimed || ''
+        })
+      });
+      setStatus('verifying');
+    } catch (e) {
+      setStatus('verifying');
+    }
+  };
+
+  return (
+    <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px dashed var(--border)' }}>
+      <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--accent)', marginBottom: '8px' }}>
+        📎 SUBMIT VERIFICATION EVIDENCE (Optional — Runs asynchronously)
+      </div>
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+        <button onClick={() => setTab('url')} style={{ padding: '4px 10px', fontSize: '11px', borderRadius: '6px', border: 'none', background: tab === 'url' ? 'var(--accent)' : 'rgba(0,0,0,0.1)', color: tab === 'url' ? '#fff' : 'var(--text)' }}>URL / Website</button>
+        <button onClick={() => setTab('file')} style={{ padding: '4px 10px', fontSize: '11px', borderRadius: '6px', border: 'none', background: tab === 'file' ? 'var(--accent)' : 'rgba(0,0,0,0.1)', color: tab === 'file' ? '#fff' : 'var(--text)' }}>Upload Document</button>
+        <button onClick={() => setTab('notes')} style={{ padding: '4px 10px', fontSize: '11px', borderRadius: '6px', border: 'none', background: tab === 'notes' ? 'var(--accent)' : 'rgba(0,0,0,0.1)', color: tab === 'notes' ? '#fff' : 'var(--text)' }}>Text / Notes</button>
+      </div>
+      <div style={{ display: 'flex', gap: '8px' }}>
+        <input
+          type="text"
+          value={inputVal}
+          onChange={e => setInputVal(e.target.value)}
+          placeholder={tab === 'url' ? "https://example.com/blog-post" : tab === 'file' ? "Paste Document Drive Link or Filename" : "Describe the artifact or quote..."}
+          style={{ flex: 1, padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', fontSize: '12px' }}
+          disabled={status !== 'idle'}
+        />
+        <button onClick={handleSubmit} disabled={status !== 'idle' || !inputVal} style={{ padding: '8px 16px', borderRadius: '6px', border: 'none', background: 'var(--accent)', color: '#fff', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>
+          {status === 'submitting' ? 'Sending...' : status === 'verifying' ? '⏳ Ingesting in Background' : 'Submit'}
+        </button>
+      </div>
+      {status === 'verifying' && (
+        <div style={{ fontSize: '11px', color: '#10b981', marginTop: '6px' }}>
+          ✓ Background Verification Engine triggered. You do not need to wait—proceed to next iteration!
+        </div>
+      )}
+    </div>
+  );
+};
+
 const HomeworkPage: React.FC = () => {
   const navigate = useNavigate();
   const { session } = useAuth();
@@ -132,10 +192,13 @@ const HomeworkPage: React.FC = () => {
         <header style={{ marginBottom: '40px', borderBottom: '1px solid var(--border)', paddingBottom: '20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--accent)', marginBottom: '8px' }}>
             <PenTool size={20} />
-            <span style={{ fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '1px' }}>Phase 5 & 6 — Morning-After Preparation</span>
+            <span style={{ fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '1px' }}>Phase 5 & 6 — Verification & Evidence Engine</span>
           </div>
           <h1 style={{ fontSize: '32px', margin: '0 0 10px 0' }}>Homework Ledger</h1>
-          <p style={{ color: 'var(--text-dim)', margin: 0 }}>Expert ID: {expertId}</p>
+          <p style={{ color: 'var(--text-dim)', margin: '0 0 16px 0' }}>Expert ID: {expertId}</p>
+          <div style={{ background: 'rgba(124, 106, 255, 0.08)', borderLeft: '4px solid var(--accent)', padding: '16px 20px', borderRadius: '8px', fontSize: '14px', lineHeight: '1.6', color: 'var(--text)' }}>
+            💬 <strong>"You previously mentioned several resources that contributed to your expertise. Please provide supporting materials so the system can validate and better understand your learning journey."</strong>
+          </div>
         </header>
 
         {/* AI Open Loops */}
@@ -188,10 +251,12 @@ const HomeworkPage: React.FC = () => {
                   )}
 
                   {item.host_homework_instructions && (
-                    <div style={{ fontSize: '13px', color: 'var(--text-dim)' }}>
+                    <div style={{ fontSize: '13px', color: 'var(--text-dim)', marginBottom: '12px' }}>
                       <strong>Host Instructions:</strong> {item.host_homework_instructions}
                     </div>
                   )}
+
+                  <EvidenceSubmissionCard item={item} expertId={expertId} sessionId={homeworkId || 'SESS-1'} />
                 </div>
               </div>
             </div>

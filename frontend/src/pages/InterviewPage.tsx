@@ -65,7 +65,10 @@ const InterviewPage: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing] = useState(false);
   const [isSynthesizing, setIsSynthesizing] = useState(false);
+  const [nextSessionId, setNextSessionId] = useState<string | null>(null);
+  const [isChapterComplete, setIsChapterComplete] = useState(false);
   const [showDecision, setShowDecision] = useState<string | null>(null);
+  const [sessionMeta, setSessionMeta] = useState({ iteration: 1, id: 'SESS-DAY-1' });
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const [showScriptSidebar, setShowScriptSidebar] = useState(true);
@@ -122,6 +125,12 @@ const InterviewPage: React.FC = () => {
     fetch(`http://localhost:9120/session/${sessionId}`, { headers: { 'Authorization': `Bearer ${session?.access_token}` } })
       .then(res => res.json())
       .then(data => {
+        if (data.status === 'success' && data.session) {
+          setSessionMeta({
+            iteration: data.session.iteration_number || 1,
+            id: data.session.id || 'SESS-DAY-1'
+          });
+        }
         if (data.status === 'success' && data.session?.script) {
           const arc = data.session.script.interview_arc || data.session.script;
           // Sort entries by block number to guarantee correct display order (block_1 → block_2 → … → block_5)
@@ -273,6 +282,25 @@ const InterviewPage: React.FC = () => {
           break;
         }
 
+        case 'system_auto_pause': {
+          displayText = data.question ?? "That is a brilliant insight to conclude this chapter on. Let me pause here to synthesize our notes and prepare the next part!";
+          setIsSynthesizing(true);
+          fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } })
+            .then(r => r.json())
+            .then(resData => {
+              setIsSynthesizing(false);
+              if (resData.next_session_id) {
+                setNextSessionId(resData.next_session_id);
+              }
+              setIsChapterComplete(true);
+            })
+            .catch(e => {
+              console.error(e);
+              setIsSynthesizing(false);
+            });
+          break;
+        }
+
         default: {
           // Fallback: display whatever the backend returned
           displayText = data.question ?? "Let's continue.";
@@ -309,7 +337,11 @@ const InterviewPage: React.FC = () => {
     setIsSynthesizing(true);
     try {
       // Wait for synthesis + homework generation to fully complete before navigating
-      await fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } });
+      const res = await fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } });
+      const resData = await res.json();
+      if (resData.next_session_id) {
+        localStorage.setItem('session_id', resData.next_session_id);
+      }
       navigate('/homework');
     } catch (err) {
       console.error(err);
@@ -374,6 +406,34 @@ const InterviewPage: React.FC = () => {
     }
   };
 
+  // ─── Chapter Complete screen (Part 2 transition) ──────────────────────────
+  if (isChapterComplete) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg)', color: 'var(--text)' }}>
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--accent)', borderRadius: '16px', padding: '40px', maxWidth: '500px', textAlign: 'center', boxShadow: '0 20px 25px -5px rgba(124,106,255,0.15)' }}>
+          <div style={{ fontSize: '48px', marginBottom: '16px' }}>✨</div>
+          <h2 style={{ fontSize: '24px', marginBottom: '12px' }}>Chapter Fully Synthesized</h2>
+          <p style={{ color: 'var(--text-dim)', lineHeight: '1.6', marginBottom: '28px' }}>
+            The AI Journalist has processed your tacit insights, generated homework verification loops, and prepared memory vectors for Chapter Part 2.
+          </p>
+          <button
+            className="send-btn"
+            style={{ width: '100%', padding: '14px', fontSize: '16px', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+            onClick={() => {
+              if (nextSessionId) {
+                localStorage.setItem('session_id', nextSessionId);
+              }
+              setIsChapterComplete(false);
+              window.location.reload();
+            }}
+          >
+            Continue to Session Part 2 <ArrowRight size={18} />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // ─── Synthesizing screen ──────────────────────────────────────────────────
   if (isSynthesizing) {
     return (
@@ -395,10 +455,10 @@ const InterviewPage: React.FC = () => {
               <BrainCircuit size={20} />
             </button>
             <div className="chat-header-info">
-              <h1>Live Interview — Demo Expert</h1>
+              <h1>Live Interview — {session?.user?.user_metadata?.name || session?.user?.email?.split('@')[0] || 'Expert'}</h1>
               <div className="chat-header-status">
                 <div className="pulse-dot" style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--green)' }}></div>
-                SESS-DEMO-DAY1 · Recording Active
+                Session Iteration {sessionMeta.iteration} ({sessionMeta.id.slice(0, 8)}) · Recording Active
               </div>
             </div>
           </div>

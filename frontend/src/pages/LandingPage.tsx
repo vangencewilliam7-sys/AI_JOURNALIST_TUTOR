@@ -48,6 +48,7 @@ const LandingPage: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token}` },
         body: JSON.stringify({
+          name: session?.user?.user_metadata?.name || session?.user?.email?.split('@')[0],
           domain: tutorProfile.expertise_streams,
           stream_type: selectedDomain === 'Tutor' ? 'tutor' : 'general',
           target_audience: tutorProfile.target_audience,
