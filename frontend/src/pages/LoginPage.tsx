@@ -62,7 +62,7 @@ export const LoginPage = () => {
 
         navigate('/landing');
       } else {
-        const { error } = await supabase.auth.signUp({
+        const { data, error } = await supabase.auth.signUp({
           email,
           password,
           options: {
@@ -74,6 +74,19 @@ export const LoginPage = () => {
           }
         });
         if (error) throw error;
+
+        if (data?.user) {
+          try {
+            await supabase.table('experts').upsert({
+              id: data.user.id,
+              name: name || email.split('@')[0],
+              domain: 'General',
+              stream_type: 'general'
+            });
+          } catch (upsertErr) {
+            console.error("Failed to sync expert name", upsertErr);
+          }
+        }
         navigate('/landing');
       }
     } catch (err: any) {

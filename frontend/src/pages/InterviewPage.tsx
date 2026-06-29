@@ -118,7 +118,7 @@ const InterviewPage: React.FC = () => {
         }
       ]);
     }
-    
+
     hasSeededRef.current = true;
 
     // Fetch the script data for the sidebar
@@ -161,7 +161,7 @@ const InterviewPage: React.FC = () => {
 
           const restoredSnapshotStr = localStorage.getItem('restored_snapshot');
           let finalSnapshot = dbSnapshot;
-          
+
           if (restoredSnapshotStr) {
             try {
               finalSnapshot = JSON.parse(restoredSnapshotStr);
