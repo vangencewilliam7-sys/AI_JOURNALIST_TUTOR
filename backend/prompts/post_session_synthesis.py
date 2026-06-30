@@ -219,7 +219,8 @@ Analysis:
   "priority": "HIGH"
 }}
 
-OUTPUT RULES:
+OUTPUT RULES (STRICT ZERO-HALLUCINATION):
+- CRITICAL: If the expert did NOT explicitly name a specific book, video, course, documentation URL, mentor, or make a controversial operational claim in this block transcript, you MUST return an empty array `"ai_open_loops": []`. DO NOT invent, infer, or hallucinate potential resources or assumptions.
 - Only extract tasks for actual resources mentioned (books, courses, videos, mentors, docs) or bold operational claims.
 - Rank them by priority. CRITICAL means it is foundational to the curriculum.
 - Output STRICTLY in the following JSON format using the key `ai_open_loops` to map directly to the database column.
@@ -231,6 +232,7 @@ OUTPUT RULES:
       "topic": "The core topic being discussed.",
       "the_claim": "What the expert specifically claimed (e.g., 'I learned Redis LRU policies from this video' OR 'React context re-renders everything').",
       "source_mentioned": "The exact resource mentioned, if applicable. (Null if it's an operational claim).",
+      "expert_quote_trigger": "Exact verbatim sentence or response from the expert transcript where this homework item was found (e.g., 'For Caching, I watched Hussein Nasser's YouTube videos...').",
       "verification_instructions": "Highly specific instructions for the human host on HOW to verify this. (e.g., 'Check Hussein Nasser's playlist for LRU eviction' or 'Search Reddit/StackOverflow to see if this React Context issue is still true in the current version.')",
       "priority": "CRITICAL | HIGH | MEDIUM"
     }}

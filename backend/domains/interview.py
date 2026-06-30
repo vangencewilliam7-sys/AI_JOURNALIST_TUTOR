@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Any, List, Tuple
 from fastapi import HTTPException
 
+from datetime import datetime, timezone
 from domains.base import BaseDomain
 from prompts import (
     ARCHETYPE_RULES,
@@ -25,6 +26,7 @@ from prompts import (
     OBJECTIVE_REQUIREMENTS,
     COVERAGE_ENGINE_PROMPT,
     TOPIC_CONTROLLER_PROMPT,
+    DRIFT_DETECTOR_PROMPT,
     INSIGHT_DETECTION_PROMPT,
     INSIGHT_PRIORITIZATION_PROMPT,
     KNOWLEDGE_GRAPH_UPDATE_PROMPT,
@@ -158,6 +160,26 @@ class InterviewDomain(BaseDomain):
         
         # Pull State
         current_scratchpad = session.get("live_scratchpad", {})
+
+        # Check Emergency Token Safety Boundary (30,000 chars to prevent memory crash)
+        sat_pct, turn_count, sat_reason = self._compute_session_saturation(new_transcript, current_scratchpad)
+        if len(new_transcript) >= 30000:
+            logger.info(f"Session reached emergency boundary saturation: {sat_reason}")
+            wrap_up_msg = "We have covered an immense amount of ground in this session! Let me pause here to run our verification engine and synthesize our notes before continuing."
+            new_transcript += f"\n\n[AI JOURNALIST]: {wrap_up_msg}"
+            self.supabase.table("interview_sessions").update({
+                "raw_transcript": new_transcript,
+                "live_scratchpad": current_scratchpad
+            }).eq("id", session_id).execute()
+            return {
+                "question": wrap_up_msg,
+                "decision": {
+                    "action": "system_auto_pause",
+                    "intent": "conclude",
+                    "reasoning": f"Emergency Token Safety Boundary reached: {sat_reason}"
+                }
+            }
+
         current_block = current_scratchpad.get("current_block", "Block 1: Personal Origin & Persona")
         current_topic = current_scratchpad.get("current_topic", "General Exploration")
         current_module = current_scratchpad.get("current_module", "Unknown")
@@ -300,8 +322,25 @@ class InterviewDomain(BaseDomain):
             next_action = "ASK_GAP_QUESTION"
             
         # ── Execute Action ──
-        if next_action in ["MOVE_BLOCK", "MOVE_TOPIC"]:
-            # Reset tangent depth for the next block/topic
+        if next_action == "MOVE_BLOCK":
+            logger.info(f"Block completed ({current_block}). Triggering natural block-level pause.")
+            wrap_up_msg = f"We have covered {current_block} comprehensively! Let me pause here to run our verification engine on this block and prepare the next section."
+            new_transcript += f"\n\n[AI JOURNALIST]: {wrap_up_msg}"
+            self.supabase.table("interview_sessions").update({
+                "raw_transcript": new_transcript,
+                "live_scratchpad": current_scratchpad
+            }).eq("id", session_id).execute()
+            return {
+                "question": wrap_up_msg,
+                "decision": {
+                    "action": "system_auto_pause",
+                    "intent": "conclude",
+                    "reasoning": f"Curriculum Block completed: {current_block}"
+                }
+            }
+
+        elif next_action == "MOVE_TOPIC":
+            # Reset tangent depth for the next topic
             current_scratchpad["tangent_depth"] = 0
             current_scratchpad["tangent_budget"] = TANGENT_BUDGET_RULES["base_budget"]
             current_scratchpad["extra_budget_used"] = 0
@@ -473,8 +512,8 @@ class InterviewDomain(BaseDomain):
         expert_turns = [l for l in transcript.split("\n") if l.strip().startswith("[EXPERT]:")]
         turn_count = len(expert_turns)
         
-        # 1. Token pressure: optimal chapter session ceiling = 8,000 chars (~2,000 tokens / ~10 rich Q&As)
-        token_pressure = min(1.0, len(transcript) / 8000.0)
+        # 1. Token pressure: emergency block safety ceiling = 30,000 chars (~7,500 words / ~45 mins)
+        token_pressure = min(1.0, len(transcript) / 30000.0)
         
         # 2. Objectives complete rate (target 4 objectives per chapter block)
         sat_objs = (scratchpad or {}).get("satisfied_objectives", [])

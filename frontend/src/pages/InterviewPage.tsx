@@ -67,6 +67,7 @@ const InterviewPage: React.FC = () => {
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [nextSessionId, setNextSessionId] = useState<string | null>(null);
   const [isChapterComplete, setIsChapterComplete] = useState(false);
+  const [hasPendingHomework, setHasPendingHomework] = useState(false);
   const [showDecision, setShowDecision] = useState<string | null>(null);
   const [sessionMeta, setSessionMeta] = useState({ iteration: 1, id: 'SESS-DAY-1' });
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -264,7 +265,25 @@ const InterviewPage: React.FC = () => {
               scriptThemes[next.blockIdx]?.questions?.[next.qIdx]?.question_text
               ?? "Great — let's keep going.";
           } else {
-            displayText = "That wraps up all our topics — ending the session now.";
+            displayText = "That is a brilliant insight to conclude this chapter on. Let me pause here to synthesize our notes and prepare the next part!";
+            setTimeout(() => {
+              setIsSynthesizing(true);
+              fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } })
+                .then(r => r.json())
+                .then(resData => {
+                  setIsSynthesizing(false);
+                  if (resData.next_session_id) {
+                    setNextSessionId(resData.next_session_id);
+                    localStorage.setItem('session_id', resData.next_session_id);
+                  }
+                  setHasPendingHomework(Boolean(resData.has_pending_homework));
+                  setIsChapterComplete(true);
+                })
+                .catch(e => {
+                  console.error(e);
+                  setIsSynthesizing(false);
+                });
+            }, 3000);
           }
           break;
         }
@@ -284,20 +303,24 @@ const InterviewPage: React.FC = () => {
 
         case 'system_auto_pause': {
           displayText = data.question ?? "That is a brilliant insight to conclude this chapter on. Let me pause here to synthesize our notes and prepare the next part!";
-          setIsSynthesizing(true);
-          fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } })
-            .then(r => r.json())
-            .then(resData => {
-              setIsSynthesizing(false);
-              if (resData.next_session_id) {
-                setNextSessionId(resData.next_session_id);
-              }
-              setIsChapterComplete(true);
-            })
-            .catch(e => {
-              console.error(e);
-              setIsSynthesizing(false);
-            });
+          setTimeout(() => {
+            setIsSynthesizing(true);
+            fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } })
+              .then(r => r.json())
+              .then(resData => {
+                setIsSynthesizing(false);
+                if (resData.next_session_id) {
+                  setNextSessionId(resData.next_session_id);
+                  localStorage.setItem('session_id', resData.next_session_id);
+                }
+                setHasPendingHomework(Boolean(resData.has_pending_homework));
+                setIsChapterComplete(true);
+              })
+              .catch(e => {
+                console.error(e);
+                setIsSynthesizing(false);
+              });
+          }, 3000);
           break;
         }
 
@@ -408,18 +431,28 @@ const InterviewPage: React.FC = () => {
 
   // ─── Chapter Complete screen (Part 2 transition) ──────────────────────────
   if (isChapterComplete) {
+    const isLocked = hasPendingHomework && localStorage.getItem('hw_reviewed_' + (sessionId || '')) !== 'true';
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg)', color: 'var(--text)' }}>
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--accent)', borderRadius: '16px', padding: '40px', maxWidth: '500px', textAlign: 'center', boxShadow: '0 20px 25px -5px rgba(124,106,255,0.15)' }}>
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--accent)', borderRadius: '16px', padding: '40px', maxWidth: '520px', textAlign: 'center', boxShadow: '0 20px 25px -5px rgba(124,106,255,0.15)' }}>
           <div style={{ fontSize: '48px', marginBottom: '16px' }}>✨</div>
-          <h2 style={{ fontSize: '24px', marginBottom: '12px' }}>Chapter Fully Synthesized</h2>
-          <p style={{ color: 'var(--text-dim)', lineHeight: '1.6', marginBottom: '28px' }}>
-            The AI Journalist has processed your tacit insights, generated homework verification loops, and prepared memory vectors for Chapter Part 2.
+          <h2 style={{ fontSize: '24px', marginBottom: '12px' }}>Block Complete & Synthesized</h2>
+          <p style={{ color: 'var(--text-dim)', lineHeight: '1.6', marginBottom: '20px' }}>
+            The AI Journalist has processed this block's tacit insights, generated block-isolated homework verification loops, and prepared the clean handoff into the next block.
           </p>
+
+          {isLocked && (
+            <div style={{ background: 'rgba(245, 158, 11, 0.1)', border: '1px solid #f59e0b', borderRadius: '10px', padding: '14px', marginBottom: '20px', fontSize: '13px', color: '#f59e0b', textAlign: 'left' }}>
+              <strong>🔒 Progression Locked:</strong> Verification tasks or open loops were found in this block! You must click <strong>Review Homework Ledger First</strong> below and verify the resources before continuing to the next block.
+            </div>
+          )}
+
           <button
             className="send-btn"
-            style={{ width: '100%', padding: '14px', fontSize: '16px', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+            disabled={isLocked}
+            style={{ width: '100%', padding: '14px', fontSize: '15px', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', opacity: isLocked ? 0.45 : 1, cursor: isLocked ? 'not-allowed' : 'pointer' }}
             onClick={() => {
+              if (isLocked) return;
               if (nextSessionId) {
                 localStorage.setItem('session_id', nextSessionId);
               }
@@ -427,7 +460,18 @@ const InterviewPage: React.FC = () => {
               window.location.reload();
             }}
           >
-            Continue to Session Part 2 <ArrowRight size={18} />
+            {isLocked ? '🔒 Review Homework First to Continue' : 'Continue to Next Block / Session'} {!isLocked && <ArrowRight size={18} />}
+          </button>
+          <button
+            style={{ width: '100%', marginTop: '12px', padding: '14px', fontSize: '14px', fontWeight: 700, background: isLocked ? 'var(--accent)' : 'transparent', border: `1px solid ${isLocked ? 'var(--accent)' : 'var(--border)'}`, color: isLocked ? '#fff' : 'var(--text-dim)', borderRadius: '8px', cursor: 'pointer', boxShadow: isLocked ? '0 4px 14px rgba(124, 106, 255, 0.35)' : 'none' }}
+            onClick={() => {
+              if (nextSessionId) {
+                localStorage.setItem('session_id', nextSessionId);
+              }
+              navigate('/homework');
+            }}
+          >
+            📎 Review Homework Ledger First {isLocked && ' (Action Required)'}
           </button>
         </div>
       </div>
@@ -440,7 +484,7 @@ const InterviewPage: React.FC = () => {
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg)', color: 'var(--text)' }}>
         <Loader2 size={48} className="spin" style={{ color: 'var(--accent)', marginBottom: '20px' }} />
         <h2>Synthesizing Knowledge...</h2>
-        <p style={{ color: 'var(--text-dim)' }}>Extracting tacit knowledge from session SESS-DEMO-DAY1 for Demo Expert.</p>
+        <p style={{ color: 'var(--text-dim)' }}>Extracting tacit knowledge and building vector memory for Chapter Part 2.</p>
       </div>
     );
   }

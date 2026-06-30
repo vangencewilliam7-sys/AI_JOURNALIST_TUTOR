@@ -339,11 +339,13 @@ async def end_session_endpoint(session_id: str, current_expert_id: str = Depends
         }).execute()
         next_session_id = next_sess_res.data[0]["id"] if next_sess_res.data else None
 
+        hw_loops = (hw_result.get("homework") or {}).get("ai_open_loops", [])
         return {
             "status": "success",
             "message": "Session synthesized and next chapter prepared.",
             "synthesis": synth_result["session_synthesis"],
             "homework": hw_result["homework"],
+            "has_pending_homework": len(hw_loops) > 0,
             "next_session_id": next_session_id
         }
     except Exception as e:

@@ -95,6 +95,9 @@ const HomeworkPage: React.FC = () => {
         if (data.status === 'success' && data.homework) {
           setHomeworkId(data.homework.id);
           setHomework(data.homework.ai_open_loops || []);
+          if (data.homework.session_id) {
+            localStorage.setItem('hw_reviewed_' + data.homework.session_id, 'true');
+          }
           if (data.homework.human_manual_notes) {
             setManualNotes(data.homework.human_manual_notes);
           }
@@ -209,7 +212,11 @@ const HomeworkPage: React.FC = () => {
           </div>
 
           {homework.length === 0 && (
-            <p style={{ color: 'var(--text-dim)' }}>No open loops found for this expert yet. Complete a Day 1 session first.</p>
+            <div style={{ background: 'var(--bg-card)', border: '1px solid #10b981', borderRadius: '12px', padding: '24px', textAlign: 'center', color: '#10b981', marginBottom: '16px' }}>
+              <div style={{ fontSize: '24px', marginBottom: '8px' }}>🎉</div>
+              <strong style={{ fontSize: '16px', display: 'block', marginBottom: '4px' }}>No Homework Found in This Block</strong>
+              <span style={{ fontSize: '14px', color: 'var(--text-dim)' }}>No verification tasks or unverified learning resources were detected in this block's responses. You are clear to proceed to the next block!</span>
+            </div>
           )}
 
           {homework.map((item, idx) => (
@@ -225,6 +232,13 @@ const HomeworkPage: React.FC = () => {
                       <span style={{ background: 'rgba(239,68,68,0.1)', color: '#ef4444', fontSize: '10px', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold', textTransform: 'uppercase' }}>{item.priority}</span>
                     )}
                   </div>
+
+                  {item.expert_quote_trigger && (
+                    <div style={{ marginBottom: '12px', padding: '10px 14px', borderRadius: '8px', background: 'rgba(168, 85, 247, 0.08)', borderLeft: '3px solid #a855f7', fontStyle: 'italic', fontSize: '13px', color: 'var(--text)' }}>
+                      <strong style={{ fontStyle: 'normal', display: 'block', marginBottom: '4px', color: '#a855f7' }}>📍 Found in Your Response Quote:</strong>
+                      "{item.expert_quote_trigger}"
+                    </div>
+                  )}
 
                   {item.resource_mentioned && (
                     <div style={{ marginBottom: '12px', fontSize: '14px' }}>
