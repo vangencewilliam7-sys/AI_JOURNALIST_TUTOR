@@ -20,9 +20,38 @@ const LandingPage: React.FC = () => {
     short_bio: '',
     target_audience: '',
   });
+  const [activeSession, setActiveSession] = useState<any>(null);
+  const [hasPendingInsights, setHasPendingInsights] = useState<boolean>(false);
   const [suggestions, setSuggestions] = useState<Record<string, (string | number)[]>>({
     domain: [], target_audience: [], short_bio: [], years_of_experience: []
   });
+
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    
+    supabase.from('interview_sessions')
+      .select('id, status, iteration_number')
+      .eq('expert_id', session.user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .then(res => {
+        if (res.data && res.data.length > 0) {
+          const latest = res.data[0];
+          setActiveSession(latest);
+          
+          supabase.from('expert_tacit_insights')
+            .select('id')
+            .eq('session_id', latest.id)
+            .eq('status', 'pending')
+            .limit(1)
+            .then(insRes => {
+              if (insRes.data && insRes.data.length > 0) {
+                setHasPendingInsights(true);
+              }
+            });
+        }
+      });
+  }, [session]);
 
   // Fetch autocomplete suggestions from server on mount
   useEffect(() => {
@@ -219,7 +248,8 @@ const LandingPage: React.FC = () => {
           AI Journalist
         </div>
         <div className="landing-nav-actions">
-          <button className="btn-ghost" onClick={() => navigate('/dashboard')}>Homework Dashboard</button>
+          <button className="btn-ghost" onClick={() => navigate('/knowledge')}>Tacit Knowledge Dashboard</button>
+          <button className="btn-ghost" onClick={() => navigate('/homework')}>Homework Dashboard</button>
           <button className="btn-ghost" onClick={handleSignOut} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <LogOut size={14} /> Log Out
           </button>
@@ -229,6 +259,40 @@ const LandingPage: React.FC = () => {
         <h1 className="landing-title">Extract Your<br />Unwritten Knowledge.</h1>
         <p className="landing-subtitle">Synthesizing expert tacit knowledge into a structured knowledge blueprint.</p>
         
+        {hasPendingInsights && activeSession && (
+          <div style={{ 
+            background: 'rgba(124,106,255,0.08)', 
+            border: '1px solid var(--accent, #7c6aff)', 
+            borderRadius: '12px', 
+            padding: '16px 24px', 
+            margin: '24px auto 0 auto', 
+            maxWidth: '650px', 
+            display: 'flex', 
+            justifyContent: 'space-between', 
+            alignItems: 'center',
+            textAlign: 'left'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+              <div style={{ background: 'rgba(124,106,255,0.15)', padding: '10px', borderRadius: '50%', color: 'var(--accent, #7c6aff)' }}>
+                <BrainCircuit size={24} />
+              </div>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text)' }}>Verify Extracted Insights</div>
+                <div style={{ fontSize: '13px', color: 'var(--text-dim)', marginTop: '4px' }}>
+                  You have pending tacit insights from Session Iteration {activeSession.iteration_number} to review.
+                </div>
+              </div>
+            </div>
+            <button 
+              className="btn-primary" 
+              onClick={() => navigate(`/verify-insights/${activeSession.id}`)}
+              style={{ fontSize: '13px', padding: '10px 20px', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}
+            >
+              Verify Now <ChevronRight size={14} />
+            </button>
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: '20px', justifyContent: 'center', marginTop: '40px', flexWrap: 'wrap' }}>
            <div 
              style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '30px', width: '220px', cursor: 'pointer', transition: 'all 0.2s', boxShadow: 'var(--shadow-sm)' }}

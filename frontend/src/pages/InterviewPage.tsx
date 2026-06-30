@@ -50,11 +50,65 @@ const parseTranscriptToMessages = (transcript: string, reentryStatement?: string
   }
   return parsedMessages;
 };
-// ─── 2D pointer position returned by advanceTeleprompter ─────────────────────
 interface Pointer {
   blockIdx: number;
   qIdx: number;
 }
+
+// Helper to parse script structure into sidebar theme objects
+const parseScriptToThemes = (script: any): any[] => {
+  if (!script) return [];
+  let extractedThemes: any[] = [];
+  if (script.module_backlog) {
+    let globalIdx = 0;
+    script.module_backlog.forEach((mod: any) => {
+      (mod.topics || []).forEach((topic: any) => {
+        extractedThemes.push({
+          theme_id: globalIdx++,
+          theme_title: `${mod.module_title} - ${topic.topic_title}`,
+          editorial_rationale: (topic.target_objectives || []).join(', ') || "Topic Exploration",
+          tentative_duration: topic.estimated_minutes || 10,
+          questions: [{
+            id: "opener",
+            question_text: topic.opener_question,
+            rationale: "Initial exploration vector",
+            vectors: topic.exploration_vectors || []
+          }]
+        });
+      });
+    });
+  } else if (script.topic_backlog) {
+    extractedThemes = script.topic_backlog.map((block: any, idx: number) => ({
+      theme_id: idx,
+      theme_title: block.topic_title || `Block ${idx+1}`,
+      editorial_rationale: block.target_knowledge_types?.join(', ') || "Phase goal",
+      tentative_duration: block.estimated_minutes || 20,
+      questions: [{ 
+        id: "opener", 
+        question_text: block.opener_question, 
+        rationale: "Initial exploration vector",
+        vectors: block.exploration_vectors || []
+      }]
+    }));
+  } else {
+    const arc = script.interview_arc || script;
+    // Sort entries by block number to guarantee correct display order
+    extractedThemes = Object.entries(arc || {})
+      .sort(([keyA], [keyB]) => {
+        const numA = parseInt(keyA.match(/\d+/)?.[0] ?? '0', 10);
+        const numB = parseInt(keyB.match(/\d+/)?.[0] ?? '0', 10);
+        return numA - numB;
+      })
+      .map(([key, phase]: [string, any], idx) => ({
+        theme_id: idx,
+        theme_title: key.replace('block_', 'Block ').replace(/_/g, ' '),
+        editorial_rationale: phase.goal || "Phase goal",
+        tentative_duration: phase.tentative_duration_minutes || 20,
+        questions: phase.questions || []
+      }));
+  }
+  return extractedThemes;
+};
 
 const InterviewPage: React.FC = () => {
   const navigate = useNavigate();
@@ -74,6 +128,8 @@ const InterviewPage: React.FC = () => {
   const [showScriptSidebar, setShowScriptSidebar] = useState(true);
   const [scriptThemes, setScriptThemes] = useState<any[]>([]);
   const [tangentCount, setTangentCount] = useState(0);
+  const [topicProgress, setTopicProgress] = useState<any[]>([]);
+  const [moduleBacklog, setModuleBacklog] = useState<any[]>([]);
 
   // ─── 2D Pointer State Machine ─────────────────────────────────────────────
   const [activeBlockIdx, setActiveBlockIdx] = useState(0);
@@ -132,24 +188,15 @@ const InterviewPage: React.FC = () => {
           });
         }
         if (data.status === 'success' && data.session?.script) {
-          const arc = data.session.script.interview_arc || data.session.script;
-          // Sort entries by block number to guarantee correct display order (block_1 → block_2 → … → block_5)
-          // Object.entries() does NOT guarantee insertion order on plain objects, so we sort explicitly.
-          const extractedThemes = Object.entries(arc || {})
-            .sort(([keyA], [keyB]) => {
-              // Extract the leading number from keys like "block_1_origin", "block_2_learning_journey", etc.
-              const numA = parseInt(keyA.match(/\d+/)?.[0] ?? '0', 10);
-              const numB = parseInt(keyB.match(/\d+/)?.[0] ?? '0', 10);
-              return numA - numB;
-            })
-            .map(([key, phase]: [string, any], idx) => ({
-              theme_id: idx,
-              theme_title: key.replace('block_', 'Block ').replace(/_/g, ' '),
-              editorial_rationale: phase.goal || "Phase goal",
-              tentative_duration: phase.tentative_duration_minutes || 20,
-              questions: phase.questions || []
-            }));
+          const extractedThemes = parseScriptToThemes(data.session.script);
           setScriptThemes(extractedThemes);
+          if (data.session.script.module_backlog) {
+            setModuleBacklog(data.session.script.module_backlog);
+          }
+
+          if (data.topic_progress) {
+            setTopicProgress(data.topic_progress);
+          }
 
           const dbTranscript = data.session.raw_transcript;
           const dbSnapshot = data.session.snapshot;
@@ -243,6 +290,18 @@ const InterviewPage: React.FC = () => {
         })
       });
       const data = await res.json();
+      
+      // Update dynamic teleprompter script if returned by the backend
+      if (data.updated_script) {
+        const extractedThemes = parseScriptToThemes(data.updated_script);
+        setScriptThemes(extractedThemes);
+        if (data.updated_script.module_backlog) {
+          setModuleBacklog(data.updated_script.module_backlog);
+        }
+      }
+      if (data.topic_progress) {
+        setTopicProgress(data.topic_progress);
+      }
 
       const action = data.decision?.action ?? '';
       const intent = data.decision?.intent ?? 'unknown';
@@ -342,7 +401,7 @@ const InterviewPage: React.FC = () => {
       if (resData.next_session_id) {
         localStorage.setItem('session_id', resData.next_session_id);
       }
-      navigate('/homework');
+      navigate(`/verify-insights/${sessionId}`);
     } catch (err) {
       console.error(err);
       alert("Failed to synthesize session.");
@@ -378,6 +437,31 @@ const InterviewPage: React.FC = () => {
       alert("Network error.");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // ─── handleJumpToBlock (clickable sidebar items) ──────────────────────────
+  const handleJumpToBlock = (blockIdx: number, qIdx: number) => {
+    if (blockIdx >= 0 && blockIdx < scriptThemes.length) {
+      setActiveBlockIdx(blockIdx);
+      const questions = scriptThemes[blockIdx]?.questions || [];
+      const safeQIdx = qIdx >= 0 && qIdx < questions.length ? qIdx : 0;
+      setActiveQuestionIdx(safeQIdx);
+      setTangentCount(0);
+
+      const newQuestion = questions[safeQIdx]?.question_text || "Let's move on to the next topic.";
+
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        role: 'ai',
+        text: newQuestion,
+        timestamp: Date.now(),
+        decision: {
+          intent_classification: 'manual_skip',
+          internal_reasoning: `Host manually jumped to block ${blockIdx}, question ${safeQIdx}.`,
+          action: 'script_question'
+        }
+      }]);
     }
   };
 
@@ -569,36 +653,142 @@ const InterviewPage: React.FC = () => {
             <p style={{ margin: '4px 0 0', fontSize: '12px', color: 'var(--text-dim)' }}>Read these questions to guide the interview.</p>
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-            {scriptThemes.map((theme, blockIdx) => (
-              <div key={theme.theme_id} style={{ marginBottom: '24px' }}>
-                <h4 style={{ fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)', marginBottom: '12px', display: 'flex', justifyContent: 'space-between' }}>
-                  <span>{theme.theme_title}</span>
-                  <span style={{ color: 'var(--accent)', fontWeight: 'bold' }}>{theme.tentative_duration}m</span>
-                </h4>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                  {theme.questions.map((q: any, qIdx: number) => {
-                    const isActive = blockIdx === activeBlockIdx && qIdx === activeQuestionIdx;
-                    return (
-                      <div
-                        key={q.id}
-                        style={{
-                          background: isActive ? 'rgba(124,106,255,0.08)' : '#f8fafc',
-                          border: `1px solid ${isActive ? 'var(--accent)' : 'var(--border)'}`,
-                          borderRadius: '8px',
-                          padding: '12px',
-                          transition: 'border-color 0.2s, background 0.2s'
-                        }}
-                      >
-                        <p style={{ margin: 0, fontSize: '13px', lineHeight: '1.5', fontWeight: isActive ? 700 : 500 }}>"{q.question_text}"</p>
-                        <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginTop: '8px', fontStyle: 'italic' }}>
-                          Rationale: {q.rationale}
+            {moduleBacklog.length > 0 ? (
+              moduleBacklog.map((mod, modIdx) => {
+                const isExtraction = mod.tracking_mode === "extraction";
+                return (
+                  <div key={mod.module_id || modIdx} style={{ marginBottom: '24px' }}>
+                    {/* Module Header */}
+                    <h4 style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-dim)', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border)', paddingBottom: '6px' }}>
+                      <span style={{ textTransform: 'uppercase', letterSpacing: '0.05em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '70%' }}>{mod.module_title}</span>
+                      <span style={{ fontSize: '9px', background: isExtraction ? 'rgba(124,106,255,0.12)' : 'rgba(16,185,129,0.12)', color: isExtraction ? 'var(--accent)' : 'var(--green)', padding: '2px 6px', borderRadius: '4px', fontWeight: 600 }}>
+                        {isExtraction ? 'EXTRACTION' : 'JOURNALISTIC'}
+                      </span>
+                    </h4>
+
+                    {/* Topics List */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      {(mod.topics || []).map((topic: any, tIdx: number) => {
+                        const combinedTitle = `${mod.module_title} - ${topic.topic_title}`;
+                        const flatIdx = scriptThemes.findIndex(theme => theme.theme_title === combinedTitle);
+                        const isActive = flatIdx === activeBlockIdx;
+                        
+                        // Find progress for this topic
+                        const progress = topicProgress.find(p => p.topic_title === topic.topic_title || p.topic_id === topic.topic_id);
+                        const components = progress?.components || {};
+                        const isComplete = progress?.is_complete || false;
+
+                        return (
+                          <div
+                            key={topic.topic_id || tIdx}
+                            onClick={() => flatIdx >= 0 && handleJumpToBlock(flatIdx, 0)}
+                            style={{
+                              background: isActive ? 'rgba(124,106,255,0.06)' : '#f8fafc',
+                              border: `1px solid ${isActive ? 'var(--accent)' : (isComplete ? 'var(--green)' : 'var(--border)')}`,
+                              borderRadius: '8px',
+                              padding: '12px',
+                              cursor: 'pointer',
+                              transition: 'border-color 0.2s, background 0.2s',
+                              position: 'relative'
+                            }}
+                          >
+                            {/* Topic Title */}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <p style={{ margin: 0, fontSize: '13px', lineHeight: '1.4', fontWeight: isActive ? 700 : 500, color: isActive ? 'var(--accent)' : 'var(--text)' }}>
+                                {topic.topic_title}
+                              </p>
+                              {isComplete && (
+                                <span style={{ fontSize: '10px', color: 'var(--green)', fontWeight: 600 }}>
+                                  ✔ Done
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Opener Question (only for active topic) */}
+                            {isActive && topic.opener_question && (
+                              <p style={{ margin: '8px 0 0', fontSize: '11px', color: 'var(--text-dim)', fontStyle: 'italic', borderTop: '1px dashed rgba(124,106,255,0.15)', paddingTop: '8px', lineHeight: '1.4' }}>
+                                "{topic.opener_question}"
+                              </p>
+                            )}
+
+                            {/* Components Grid Checklist (only for extraction mode and when topics exist) */}
+                            {isExtraction && topic.target_objectives && topic.target_objectives.length > 0 && (
+                              <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                                {topic.target_objectives.map((obj: string) => {
+                                  const isDone = components[obj] === true;
+                                  return (
+                                    <span
+                                      key={obj}
+                                      style={{
+                                        fontSize: '9px',
+                                        padding: '2px 6px',
+                                        borderRadius: '12px',
+                                        background: isDone ? 'rgba(16,185,129,0.1)' : '#f1f5f9',
+                                        color: isDone ? 'var(--green)' : '#64748b',
+                                        border: `1px solid ${isDone ? 'var(--green)' : '#cbd5e1'}`,
+                                        fontWeight: 600,
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '2px'
+                                      }}
+                                    >
+                                      {isDone ? '✔' : '○'} {obj.replace('_', ' ')}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              scriptThemes.map((theme, blockIdx) => (
+                <div key={theme.theme_id} style={{ marginBottom: '24px' }}>
+                  <h4 style={{ fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)', marginBottom: '12px', display: 'flex', justifyContent: 'space-between' }}>
+                    <span>{theme.theme_title}</span>
+                    <span style={{ color: 'var(--accent)', fontWeight: 'bold' }}>{theme.tentative_duration}m</span>
+                  </h4>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {theme.questions.map((q: any, qIdx: number) => {
+                      const isActive = blockIdx === activeBlockIdx && qIdx === activeQuestionIdx;
+                      return (
+                        <div
+                          key={q.id}
+                          onClick={() => handleJumpToBlock(blockIdx, qIdx)}
+                          style={{
+                            background: isActive ? 'rgba(124,106,255,0.08)' : '#f8fafc',
+                            border: `1px solid ${isActive ? 'var(--accent)' : 'var(--border)'}`,
+                            borderRadius: '8px',
+                            padding: '12px',
+                            cursor: 'pointer',
+                            transition: 'border-color 0.2s, background 0.2s'
+                          }}
+                        >
+                          <p style={{ margin: 0, fontSize: '13px', lineHeight: '1.5', fontWeight: isActive ? 700 : 500 }}>"{q.question_text}"</p>
+                          {q.rationale && (
+                            <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginTop: '8px', fontStyle: 'italic' }}>
+                              Rationale: {q.rationale}
+                            </div>
+                          )}
+                          {q.vectors && q.vectors.length > 0 && (
+                            <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: `1px solid ${isActive ? 'rgba(124,106,255,0.2)' : 'var(--border)'}` }}>
+                              <p style={{ margin: '0 0 6px', fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)' }}>EXPLORATION VECTORS:</p>
+                              <ul style={{ margin: 0, paddingLeft: '16px', fontSize: '12px', color: 'var(--text)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                {q.vectors.map((v: string, i: number) => <li key={i}>{v}</li>)}
+                              </ul>
+                            </div>
+                          )}
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))
+            )}
             {scriptThemes.length === 0 && <p style={{ fontSize: '13px', color: 'var(--text-dim)' }}>Loading script...</p>}
           </div>
         </div>
