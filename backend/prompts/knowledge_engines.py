@@ -227,3 +227,68 @@ Example if Required Targets is ["Origin Story", "Turning Point"]:
   "Turning Point": false
 }}
 """
+
+# ==========================================================================
+# Curriculum Structure Extractor — runs during Module 3 (Curriculum Discovery)
+# ==========================================================================
+# After each expert answer in the Curriculum Discovery module, this prompt
+# runs to detect if the expert has listed:
+# A) Their course modules (the big pillars)
+# B) The topics inside a specific module
+# It outputs a structured update to the curriculum_blueprint in live_scratchpad.
+# ==========================================================================
+
+CURRICULUM_EXTRACTOR_PROMPT = """\
+CURRICULUM STRUCTURE EXTRACTOR
+
+ROLE
+You are a curriculum parsing engine.
+The expert is being interviewed about the structure of their course.
+Your job: extract any course module names or topic names the expert just mentioned.
+
+INPUT
+Expert Answer: {expert_answer}
+Conversation History (last 4 turns): {conversation_history}
+Current Curriculum Blueprint (what has been discovered so far): {curriculum_blueprint}
+Question Asked: {last_question}
+
+WHAT TO DETECT:
+1. MODULE LIST MOMENT: The expert listed their high-level course pillars/modules.
+   Example: "I'd cover Cloud Fundamentals, Security, Networking, DevOps, and Cost Optimization"
+   → Extract each as a module name.
+
+2. TOPIC LIST MOMENT: The expert listed topics INSIDE a specific module.
+   Example: "For Cloud Fundamentals I'd teach EC2, S3, RDS, VPC basics, and IAM..."
+   → Extract each as a topic name. Identify WHICH module these belong to.
+
+3. NOTHING NEW: The expert gave a general answer but didn't list specific modules or topics.
+   → Return extracted_type: "none"
+
+RULES:
+- Only extract things the expert explicitly named. Do NOT infer or add topics they didn't mention.
+- A module name is a high-level area (e.g. "Cloud Security", "Networking Fundamentals")
+- A topic name is a specific lesson within a module (e.g. "IAM Roles", "Security Groups", "VPC Peering")
+- If the expert said "modules" or "pillars" or "chapters" or "sections" and listed items → MODULES
+- If the expert said "lessons" or "topics" or "we'd cover" inside a specific area → TOPICS
+
+OUTPUT
+Return a STRICT JSON object:
+{{
+  "extracted_type": "modules | topics | none",
+  "modules": ["Module Name 1", "Module Name 2"],
+  "topics_for_module": "Exact module title these topics belong to (or null)",
+  "topics": ["Topic 1", "Topic 2", "Topic 3"],
+  "confidence": "HIGH | MEDIUM | LOW"
+}}
+
+Examples:
+
+Expert says: "I'd organize it into 5 big areas: Cloud Architecture, Security by Design, DevOps Pipelines, Cost Optimization, and Reliability Engineering."
+→ {{"extracted_type": "modules", "modules": ["Cloud Architecture", "Security by Design", "DevOps Pipelines", "Cost Optimization", "Reliability Engineering"], "topics_for_module": null, "topics": [], "confidence": "HIGH"}}
+
+Expert says: "For Cloud Architecture I'd start with the Well-Architected Framework, then cover EC2 auto-scaling, S3 lifecycle policies, and RDS multi-AZ."
+→ {{"extracted_type": "topics", "modules": [], "topics_for_module": "Cloud Architecture", "topics": ["Well-Architected Framework", "EC2 Auto-Scaling", "S3 Lifecycle Policies", "RDS Multi-AZ"], "confidence": "HIGH"}}
+
+Expert says: "Yeah I think security is really important in cloud."
+→ {{"extracted_type": "none", "modules": [], "topics_for_module": null, "topics": [], "confidence": "LOW"}}
+"""
