@@ -277,18 +277,18 @@ const LandingPage: React.FC = () => {
                 <BrainCircuit size={24} />
               </div>
               <div>
-                <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text)' }}>Verify Extracted Insights</div>
+                <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text)' }}>Review Homework & Flywheel</div>
                 <div style={{ fontSize: '13px', color: 'var(--text-dim)', marginTop: '4px' }}>
-                  You have pending tacit insights from Session Iteration {activeSession.iteration_number} to review.
+                  You have pending homework and verification tasks from Session Iteration {activeSession.iteration_number} to review.
                 </div>
               </div>
             </div>
             <button 
               className="btn-primary" 
-              onClick={() => navigate(`/verify-insights/${activeSession.id}`)}
+              onClick={() => navigate(`/homework`)}
               style={{ fontSize: '13px', padding: '10px 20px', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}
             >
-              Verify Now <ChevronRight size={14} />
+              Go to Homework <ChevronRight size={14} />
             </button>
           </div>
         )}
