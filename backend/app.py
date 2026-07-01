@@ -328,13 +328,19 @@ async def end_session_endpoint(session_id: str, current_expert_id: str = Depends
         }).execute()
         source_id = source_res.data[0]["id"]
 
+        prior_block = prior_session.get("current_block") or "Block 1"
+        m = re.search(r'Block\s*(\d+)', prior_block, re.IGNORECASE)
+        next_block_num = int(m.group(1)) + 1 if m else 2
+        next_block_str = f"Block {next_block_num}"
+
         next_sess_res = supabase.table("interview_sessions").insert({
             "expert_id": current_expert_id,
             "iteration_number": next_iter,
             "status": "paused",
             "live_transcript_source_id": source_id,
             "script": prior_session.get("script"),
-            "current_block": prior_session.get("current_block") or "Block 1",
+            "current_block": next_block_str,
+            "raw_transcript": prior_session.get("raw_transcript"),
             "snapshot": prior_session.get("snapshot") or {}
         }).execute()
         next_session_id = next_sess_res.data[0]["id"] if next_sess_res.data else None
@@ -521,11 +527,12 @@ async def get_verification_status(session_id: str, current_expert_id: str = Depe
 async def start_session_endpoint(current_expert_id: str = Depends(get_current_expert_id)):
     """Phase 6: Create new session iteration and generate trust-signal opener."""
     try:
-        # Find latest iteration number
-        sessions_res = supabase.table("interview_sessions").select("iteration_number").eq("expert_id", current_expert_id).order("iteration_number", desc=True).limit(1).execute()
-        next_iter = 2
-        if sessions_res.data:
-            next_iter = sessions_res.data[0]["iteration_number"] + 1
+        # Find latest session
+        sessions_res = supabase.table("interview_sessions").select("*").eq("expert_id", current_expert_id).order("iteration_number", desc=True).limit(1).execute()
+        prior_session = sessions_res.data[0] if sessions_res.data else {}
+        next_iter = (prior_session.get("iteration_number") or 1) + 1 if prior_session else 2
+        prior_script = prior_session.get("script")
+        prior_transcript = prior_session.get("raw_transcript") or ""
 
         expert_res = supabase.table("experts").select("*").eq("id", current_expert_id).execute()
         expert_name = expert_res.data[0]["name"] if expert_res.data else "Expert"
@@ -544,12 +551,23 @@ async def start_session_endpoint(current_expert_id: str = Depends(get_current_ex
             "expert_id": current_expert_id,
             "iteration_number": next_iter,
             "status": "active",
-            "live_transcript_source_id": source_id
+            "live_transcript_source_id": source_id,
+            "script": prior_script,
+            "current_block": "Block 2"
         }).execute()
         session_id = session_res.data[0]["id"]
         
         # Fire Flywheel Bridge
         opener_data = await interview_domain.flywheel_bridge(current_expert_id)
+        bridge_opener = opener_data.get("bridge_opener", "") if isinstance(opener_data, dict) else ""
+        if bridge_opener:
+            new_transcript = prior_transcript.rstrip() + f"\n[AI]: {bridge_opener}" if prior_transcript else f"[AI]: {bridge_opener}"
+            try:
+                supabase.table("interview_sessions").update({
+                    "raw_transcript": new_transcript
+                }).eq("id", session_id).execute()
+            except Exception as e:
+                logger.warning(f"Could not update raw_transcript on new session: {e}")
         
         return {
             "status": "success",

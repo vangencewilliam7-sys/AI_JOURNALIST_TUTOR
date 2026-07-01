@@ -92,6 +92,10 @@ const HomeworkPage: React.FC = () => {
       try {
         const res = await fetch(`${API_BASE_URL}/homework`, { headers: { 'Authorization': `Bearer ${session?.access_token}` } });
         const data = await res.json();
+        const currSessId = localStorage.getItem('session_id') || '';
+        if (currSessId) {
+          localStorage.setItem('hw_reviewed_' + currSessId, 'true');
+        }
         if (data.status === 'success' && data.homework) {
           setHomeworkId(data.homework.id);
           setHomework(data.homework.ai_open_loops || []);
@@ -301,14 +305,27 @@ const HomeworkPage: React.FC = () => {
             <p style={{ color: 'var(--text-dim)', margin: '0 auto 24px auto', maxWidth: '500px', fontSize: '14px', lineHeight: '1.5' }}>
               The Flywheel Bridge will combine the AI's open loops with your manual research notes to generate a trust-signal opening script for Day 2.
             </p>
-            <button 
-              onClick={handleFlywheel}
-              disabled={!homeworkId}
-              style={{ background: homeworkId ? 'var(--accent)' : 'var(--border)', color: 'white', border: 'none', padding: '14px 28px', borderRadius: '8px', fontSize: '14px', fontWeight: 'bold', cursor: homeworkId ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
-            >
-              <RefreshCw size={18} />
-              Trigger Flywheel Bridge
-            </button>
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button 
+                onClick={handleFlywheel}
+                disabled={!homeworkId}
+                style={{ background: homeworkId ? 'var(--accent)' : 'var(--border)', color: 'white', border: 'none', padding: '14px 28px', borderRadius: '8px', fontSize: '14px', fontWeight: 'bold', cursor: homeworkId ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+              >
+                <RefreshCw size={18} />
+                Trigger Flywheel Bridge
+              </button>
+              <button 
+                onClick={async () => {
+                  if (generationPhase === 'idle') {
+                    await handleFlywheel();
+                  }
+                  navigate('/interview');
+                }}
+                style={{ background: 'transparent', color: 'var(--accent)', border: '1px solid var(--accent)', padding: '14px 28px', borderRadius: '8px', fontSize: '14px', fontWeight: 'bold', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+              >
+                Return to Interview Studio / Block 2 →
+              </button>
+            </div>
           </div>
         )}
 
@@ -385,7 +402,7 @@ const HomeworkPage: React.FC = () => {
               <div style={{ marginTop: '20px', textAlign: 'center' }}>
                 <button 
                   className="btn-go-live" 
-                  onClick={() => navigate('/script')}
+                  onClick={() => navigate('/interview')}
                   style={{ display: 'inline-flex' }}
                 >
                   Launch Day 2 Session →

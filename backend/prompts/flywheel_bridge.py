@@ -7,7 +7,7 @@
 # ==========================================================================
 
 FLYWHEEL_BRIDGE_PROMPT = """\
-You are the podcast host opening a new interview session with an expert you've already spoken to. Your job is to present a "Verification Challenge" based on the homework you did overnight.
+You are the podcast host opening a new interview session (Day 2 / Block 2) with an expert you've already spoken to.
 
 EXPERT CONTEXT:
 - Name: {expert_name}
@@ -20,27 +20,18 @@ INTERVIEW STYLE:
 VALIDATED HOMEWORK LEDGER:
 AI Identified Resources to Verify: {ai_open_loops}
 Host's Overnight Research Notes (The Truth): "{human_manual_notes}"
+Second Block First Question to Ask: "{block_2_first_question}"
 
-TASK: Generate the opening statement for today's session.
-Rules:
-1. Reference the exact resource the expert mentioned yesterday (e.g., a specific book, video, or mentor).
-2. Weave in the host's overnight research notes to prove the host went and actually read/watched that resource.
-3. Present a friendly but firm "Verification Challenge". State what the resource actually says, and ask the expert if that aligns with what they learned, or if they disagree with the resource.
-4. This must function as a deep "trust signal" and a friction point to extract real tacit knowledge.
-
-LENGTH RULE: The bridge opener MUST be 3-5 sentences. Conversational, warm, and ready to be spoken aloud. Do NOT write an essay or monologue. The host should be able to say this naturally in under 30 seconds.
-
-TONE RULE: Match the tone to the INTERVIEW STYLE above. Keep it casual. You are chatting over coffee, not interrogating them in a courtroom.
-
-FEW-SHOT EXAMPLE:
-{{
-  "internal_reasoning": "Expert mentioned learning caching from Hussein Nasser. Host watched the video and noted it focuses on LRU eviction. Challenging the expert on whether they use LRU or LFU will force them to reveal their real-world preference.",
-  "bridge_opener": "Yesterday you mentioned learning caching from Hussein Nasser's YouTube videos. Well, I actually went and watched that series last night. He talks heavily about LRU eviction policies. So, when you are building your modules, are you pulling from his specific definition of LRU, or have you found that you actually need a different approach in the real world?"
-}}
+TASK: Generate the opening statement for today's Block 2 session.
+CRITICAL FORMATTING RULE: Do NOT combine everything into a single paragraph! You MUST format the script with double line breaks (\\n\\n) separating exactly three sections:
+1. Interaction Greetings: A natural greeting welcoming the expert back to the studio for Day {current_day} / Block 2.
+2. Summary of the Previous Block: Synthesize previous insights and prove you did your homework by weaving in your overnight research notes about the exact resources mentioned yesterday.
+3. Second Block First Question: Transition seamlessly into asking the Second Block First Question: "{block_2_first_question}".
 
 Output STRICTLY in the following JSON format:
 {{
-  "internal_reasoning": "Why this specific verification challenge establishes trust and extracts tacit knowledge.",
-  "bridge_opener": "The exact conversational script the human host will say out loud to open the interview."
+  "internal_reasoning": "Why this specific structured opening establishes trust and transitions smoothly into Block 2.",
+  "bridge_opener": "Interaction greetings\\n\\nSummary of the previous block weaving in overnight research notes\\n\\nSecond block first question"
 }}
 """
+

@@ -178,8 +178,21 @@ const InterviewPage: React.FC = () => {
               if (qIdx >= 0) setActiveQuestionIdx(qIdx);
             }
             setTangentCount(finalSnapshot.tangent_count || 0);
+          } else if (data.session.current_block) {
+            const targetStr = data.session.current_block.toLowerCase();
+            const bIdx = extractedThemes.findIndex(t => t.theme_title.toLowerCase().includes(targetStr) || targetStr.includes(t.theme_title.toLowerCase()));
+            if (bIdx >= 0) {
+              setActiveBlockIdx(bIdx);
+            } else if (data.session.iteration_number > 1 && extractedThemes.length > 1) {
+              setActiveBlockIdx(1);
+            } else {
+              setActiveBlockIdx(0);
+            }
+            setActiveQuestionIdx(0);
+          } else if (data.session.iteration_number > 1 && extractedThemes.length > 1) {
+            setActiveBlockIdx(1);
+            setActiveQuestionIdx(0);
           } else {
-            // Reset pointer to 0,0 whenever a new script loads and no snapshot exists
             setActiveBlockIdx(0);
             setActiveQuestionIdx(0);
           }
@@ -208,15 +221,7 @@ const InterviewPage: React.FC = () => {
       return { blockIdx: activeBlockIdx, qIdx: nextQIdx };
     }
 
-    // Current block exhausted — try the next block
-    const nextBlockIdx = activeBlockIdx + 1;
-    if (nextBlockIdx < scriptThemes.length) {
-      setActiveBlockIdx(nextBlockIdx);
-      setActiveQuestionIdx(0);
-      return { blockIdx: nextBlockIdx, qIdx: 0 };
-    }
-
-    // All blocks exhausted — fire end-session automatically (skip confirm, system-triggered)
+    // Current block exhausted — pause session and show homework transition screen!
     handleEndInterview(true);
     return null;
   }, [activeBlockIdx, activeQuestionIdx, scriptThemes]);
@@ -363,9 +368,11 @@ const InterviewPage: React.FC = () => {
       const res = await fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } });
       const resData = await res.json();
       if (resData.next_session_id) {
-        localStorage.setItem('session_id', resData.next_session_id);
+        setNextSessionId(resData.next_session_id);
       }
-      navigate('/homework');
+      setHasPendingHomework(Boolean(resData.has_pending_homework));
+      setIsSynthesizing(false);
+      setIsChapterComplete(true);
     } catch (err) {
       console.error(err);
       alert("Failed to synthesize session.");
@@ -406,32 +413,12 @@ const InterviewPage: React.FC = () => {
 
   // ─── handleNextBlock (manual override button) ─────────────────────────────
   const handleNextBlock = () => {
-    const nextBlockIdx = activeBlockIdx + 1;
-    if (nextBlockIdx < scriptThemes.length) {
-      setActiveBlockIdx(nextBlockIdx);
-      setActiveQuestionIdx(0);
-      setTangentCount(0);
-
-      // Immediately push the new script question to the chat feed for testing
-      const newQuestion = scriptThemes[nextBlockIdx]?.questions?.[0]?.question_text || "Let's move on to the next topic.";
-
-      setMessages(prev => [...prev, {
-        id: Date.now().toString(),
-        role: 'ai',
-        text: newQuestion,
-        timestamp: Date.now(),
-        decision: {
-          intent_classification: 'manual_skip',
-          internal_reasoning: 'Host manually advanced to the next block.',
-          action: 'script_question'
-        }
-      }]);
-    }
+    handleEndInterview(false);
   };
 
   // ─── Chapter Complete screen (Part 2 transition) ──────────────────────────
   if (isChapterComplete) {
-    const isLocked = hasPendingHomework && localStorage.getItem('hw_reviewed_' + (sessionId || '')) !== 'true';
+    const isLocked = localStorage.getItem('hw_reviewed_' + (sessionId || '')) !== 'true' && localStorage.getItem('hw_reviewed_' + (nextSessionId || '')) !== 'true' && localStorage.getItem('hw_reviewed_global') !== 'true';
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg)', color: 'var(--text)' }}>
         <div style={{ background: 'var(--bg-card)', border: '1px solid var(--accent)', borderRadius: '16px', padding: '40px', maxWidth: '520px', textAlign: 'center', boxShadow: '0 20px 25px -5px rgba(124,106,255,0.15)' }}>
@@ -443,7 +430,7 @@ const InterviewPage: React.FC = () => {
 
           {isLocked && (
             <div style={{ background: 'rgba(245, 158, 11, 0.1)', border: '1px solid #f59e0b', borderRadius: '10px', padding: '14px', marginBottom: '20px', fontSize: '13px', color: '#f59e0b', textAlign: 'left' }}>
-              <strong>🔒 Progression Locked:</strong> Verification tasks or open loops were found in this block! You must click <strong>Review Homework Ledger First</strong> below and verify the resources before continuing to the next block.
+              <strong>🔒 Progression Locked:</strong> You must click <strong>Review Homework Ledger First</strong> below to review the homework and provide supporting resources before continuing to Block 2.
             </div>
           )}
 
