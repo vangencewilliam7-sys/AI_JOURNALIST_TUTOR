@@ -1372,9 +1372,10 @@ TRANSITION & DIVERSITY CONTROLS:
                     discovered_topics.append(t.strip())
                     existing_lower.add(t.strip().lower())
 
-            # Transition Controller: if we already have >= 3 topics extracted, we can trigger validation
-            if len(discovered_topics) >= 3 and not reflection_asked:
-                expert_signaled_complete = True
+            # Transition Controller: only trigger validation if the expert explicitly signaled completion
+            # (or if we have asked the reflection/recovery question and they replied).
+            # Do NOT force validation automatically just because we have >= 3 topics.
+            pass
         except Exception as e:
             logger.warning(f"Phase 4 Coverage Controller failed: {e}")
 
@@ -1748,14 +1749,16 @@ TRANSITION & DIVERSITY CONTROLS:
         selected_module = None
         selected_topic  = None
         current_module_idx = 0
+        current_topic_idx = 0
 
         for m_idx, module in enumerate(course_modules):
-            for topic in module.get("topics", []):
+            for t_idx, topic in enumerate(module.get("topics", [])):
                 # Unexplored/incomplete topic has no concept field populated
                 if not topic.get("concept"):
                     selected_module = module
                     selected_topic  = topic
                     current_module_idx = m_idx
+                    current_topic_idx = t_idx
                     break
             if selected_topic:
                 break
@@ -1820,6 +1823,7 @@ TRANSITION & DIVERSITY CONTROLS:
         scratchpad["current_module"]     = current_module_title
         scratchpad["current_topic"]      = current_topic_title
         scratchpad["current_module_idx"] = current_module_idx
+        scratchpad["current_topic_idx"]  = current_topic_idx
         scratchpad["topic_status"]       = "IN_PROGRESS"
         # Reset lens tracking for the new topic
         scratchpad["topic_lens"]         = "understanding"
@@ -2095,12 +2099,14 @@ TRANSITION & DIVERSITY CONTROLS:
                 )
             )
             exp_data = _parse_json(exp_res.content)
-            reflection = exp_data.get("reflection", "").strip()
-            question   = exp_data.get("next_question", "").strip()
+            reflection = str(exp_data.get("reflection", "")).strip()
+            question   = str(exp_data.get("next_question") or exp_data.get("question") or "").strip()
             if reflection and question:
                 next_question = f"{reflection} {question}"
             elif question:
                 next_question = question
+            elif reflection:
+                next_question = reflection
         except Exception as e:
             logger.warning(f"Phase 7 Expert Understanding Engine failed: {e}")
 
@@ -3476,13 +3482,20 @@ TRANSITION & DIVERSITY CONTROLS:
                 }).execute()
             else:
                 cb = cb_res.data[0]
-                existing_modules = cb.get("course_modules", [])
-                merged_modules = existing_modules + modules
-                self.supabase.table("curriculum_blueprints").update({
-                    "course_modules": merged_modules,
-                    "session_id": session_id,
-                    "iteration_last_updated": session["iteration_number"]
-                }).eq("id", cb["id"]).execute()
+                curriculum_locked = session.get("live_scratchpad", {}).get("curriculum_locked", False)
+                if not curriculum_locked:
+                    existing_modules = cb.get("course_modules", [])
+                    merged_modules = existing_modules + modules
+                    self.supabase.table("curriculum_blueprints").update({
+                        "course_modules": merged_modules,
+                        "session_id": session_id,
+                        "iteration_last_updated": session["iteration_number"]
+                    }).eq("id", cb["id"]).execute()
+                else:
+                    self.supabase.table("curriculum_blueprints").update({
+                        "session_id": session_id,
+                        "iteration_last_updated": session["iteration_number"]
+                    }).eq("id", cb["id"]).execute()
 
         # Save updated expert profile
         self.supabase.table("expert_profile").update(update_ep).eq("id", ep["id"]).execute()
@@ -3646,12 +3659,28 @@ TRANSITION & DIVERSITY CONTROLS:
         
         # Fetch latest homework
         hw_res = self.supabase.table("homework_ledger").select("*").eq("expert_id", expert_id).order("created_at", desc=True).limit(1).execute()
-        if not hw_res.data:
-            return {"bridge_opener": "Welcome back! What should we dive into today?", "internal_reasoning": "No homework ledger found."}
+         hw= hw_res.data[0] if hw_res.data else{}
             
-        hw = hw_res.data[0]
+      
         previous_day = hw.get("iteration_number", 1)
         current_day = previous_day + 1
+
+        block_2_first_q = "Let's dive into our second block: how do your core architectural decisions hold up under extreme production load?"
+try:
+sess_res = self.supabase.table("interview_sessions").select("script").eq("expert_id", expert_id).order("iteration_number", desc=True).limit(2).execute()
+if sess_res.data:
+for s in sess_res.data:
+if s.get("script"):
+arc = s["script"].get("interview_arc") or s["script"]
+if isinstance(arc, dict):
+sorted_blocks = sorted(arc.items(), key=lambda x: int(re.search(r'\d+', x[0]).group(0)) if re.search(r'\d+', x[0]) else 99)
+if len(sorted_blocks) > 1:
+b2_data = sorted_blocks[1][1]
+if isinstance(b2_data, dict) and b2_data.get("questions") and len(b2_data["questions"]) > 0:
+block_2_first_q = b2_data["questions"][0].get("question_text", block_2_first_q)
+break
+except Exception as e:
+logger.warning(f"Could not extract block 2 first question: {e}")
         
         res = self.llm.invoke(FLYWHEEL_BRIDGE_PROMPT.format(
             expert_name=expert.get('name', ''),
@@ -3660,7 +3689,8 @@ TRANSITION & DIVERSITY CONTROLS:
             current_day=current_day,
             archetype_rules=get_archetype_rules(archetype),
             ai_open_loops=json.dumps(hw.get("ai_open_loops", []), indent=2),
-            human_manual_notes=hw.get("human_manual_notes", "")
+            human_manual_notes=hw.get("human_manual_notes", ""),
+            block_2_first_question=block_2_first_q
         ))
         cl = res.content.strip()
         if "```json" in cl: cl = cl.split("```json")[1].split("```")[0].strip()

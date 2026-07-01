@@ -15,7 +15,7 @@ Your job is to objectively analyze the transcript of the interview so far and de
 FIELDS TO EVALUATE:
 1. module_context: Why does this module exist in the overall learning journey?
 2. learning_outcomes: What specific, concrete outcomes will a student achieve by the end of this module?
-3. module_constraints: What boundaries, limitations, or pedagogical rules govern this module?
+3. module_constraints: What boundaries, limitations, prerequisites, or common misconceptions govern this module?
 
 CONVERSATION TRANSCRIPT:
 {transcript}

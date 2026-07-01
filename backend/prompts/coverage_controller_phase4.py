@@ -19,10 +19,11 @@ CONVERSATION TRANSCRIPT:
 EXTRACTION RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. Extract only major topics that belong inside the module "{current_module_title}".
-2. Exclude details like code snippets or minor points. Keep it as topic names (e.g., "SQL Indexing", "Connection Pooling").
-3. Format each topic title cleanly (Title Case, 2-6 words).
-4. If the expert has already mentioned topics for this module earlier in the conversation, extract them now.
+1. Extract only major lesson/topic titles for "{current_module_title}" (the "branches" of the curriculum tree).
+2. GROUPING RULE (CRITICAL): If the expert lists sub-concepts, technical details, or specific implementations (e.g. "HTTP", "databases", "request lifecycle") as part of a single lesson (e.g. "understanding how backend works"), do NOT extract them as separate topics. Instead, group them into a single high-level lesson title (e.g. "Backend System Fundamentals"). 
+3. Exclude details like code snippets, tools, or minor points. Keep it as high-level topic names (e.g., "SQL Indexing", "Connection Pooling").
+4. Format each topic title cleanly (Title Case, 2-6 words).
+5. If the expert has already mentioned topics for this module earlier in the conversation, extract them now.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT
