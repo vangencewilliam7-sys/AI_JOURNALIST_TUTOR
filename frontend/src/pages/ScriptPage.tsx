@@ -51,11 +51,25 @@ const ScriptPage: React.FC = () => {
             opening_icebreaker: icebreakerData.opening_icebreaker || "Welcome to the studio.",
             active_listening_cues: icebreakerData.active_listening_cues || "Listen carefully.",
             interview_arc: arc,
-            topic_backlog: data.script.topic_backlog
+            topic_backlog: data.script.topic_backlog,
+            module_backlog: data.script.module_backlog
           });
 
           let extractedThemes: any[] = [];
-          if (data.script.topic_backlog) {
+          if (data.script.module_backlog) {
+            let globalIdx = 0;
+            data.script.module_backlog.forEach((mod: any) => {
+              (mod.topics || []).forEach((topic: any) => {
+                extractedThemes.push({
+                  theme_id: globalIdx++,
+                  theme_title: `${mod.module_title} - ${topic.topic_title}`,
+                  editorial_rationale: (topic.target_objectives || []).join(', ') || "Topic Exploration",
+                  tentative_duration: topic.estimated_minutes || 10,
+                  questions: [{ id: "opener", question_text: topic.opener_question }]
+                });
+              });
+            });
+          } else if (data.script.topic_backlog) {
             extractedThemes = data.script.topic_backlog.map((block: any, idx: number) => ({
               theme_id: idx,
               theme_title: block.topic_title || `Block ${idx+1}`,
@@ -231,7 +245,48 @@ const ScriptPage: React.FC = () => {
             })}
           </aside>
           <div className="script-main">
-            {script?.topic_backlog ? (
+            {script?.module_backlog ? (
+              <>
+                <div className="section-label"><div className="section-label-dot" /> Curriculum Modules ({script.module_backlog.length} modules)</div>
+                {script.module_backlog.map((mod: any, mIdx: number) => (
+                  <div key={`mod_${mIdx}`} style={{marginBottom: '32px'}}>
+                    <h3 style={{borderBottom: '2px solid var(--border)', paddingBottom: '8px', marginBottom: '16px', color: 'var(--accent)'}}>
+                      {mod.module_title}
+                    </h3>
+                    {(mod.topics || []).map((topic: any, tIdx: number) => {
+                      const topicId = topic.topic_id || `mod_${mIdx}_topic_${tIdx}`;
+                      const isQOpen = expandedQuestions.has(topicId);
+                      return (
+                        <div key={topicId} className="phase-block">
+                          <div className="phase-header">
+                            <h4>{topic.topic_title} <span style={{fontSize:'12px', marginLeft:'8px', color:'var(--accent)'}}>({topic.estimated_minutes || 10}m)</span></h4>
+                            <small>Target Objectives: {(topic.target_objectives || []).join(', ')}</small>
+                          </div>
+                          
+                          <div className={`question-card ${isQOpen ? 'question-expanded' : ''}`}>
+                            <div className="question-top-row">
+                              <div className="question-id">OPENER</div>
+                              <div className="question-content"><p>"{topic.opener_question}"</p></div>
+                            </div>
+                            <button className="question-rationale-btn" onClick={() => toggleQuestion(topicId)}>
+                              <Eye size={11} /> {isQOpen ? 'Hide' : 'View Exploration Vectors'}
+                            </button>
+                            {isQOpen && (
+                              <div className="question-rationale-panel">
+                                <p style={{marginBottom: '8px', fontSize: '13px', fontWeight: 600}}>Exploration Vectors:</p>
+                                <ul style={{margin: 0, paddingLeft: '20px', fontSize: '13px'}}>
+                                  {topic.exploration_vectors?.map((v: string, i: number) => <li key={i} style={{marginBottom: '4px'}}>{v}</li>)}
+                                </ul>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </>
+            ) : script?.topic_backlog ? (
               <>
                 <div className="section-label"><div className="section-label-dot" /> Topic Backlog ({script.topic_backlog.length} blocks)</div>
                 {script.topic_backlog.map((block: any, idx: number) => {

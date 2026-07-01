@@ -124,6 +124,14 @@ INFERRED FLAG RULE:
 - Set "inferred": false → if the expert explicitly discussed this topic in the transcript.
 - Set "inferred": true → if the topic was NEVER discussed but is logically necessary to complete the curriculum.
 
+COURSE STRUCTURE RULE — NON-NEGOTIABLE:
+NEVER output a module with fewer than 3 topics. A module with 1 topic is WRONG and INVALID.
+A real course module covers multiple facets of its theme. For example:
+- Module: "Introduction to Cloud Architecture" → Topics: Core Principles, Cloud Service Models (IaaS/PaaS/SaaS), Choosing the Right Deployment, AWS Global Infrastructure, Cost Optimization Basics
+- Module: "Designing Secure Architectures" → Topics: Security by Design Philosophy, Identity & Access Management, Network Security, Data Protection & Encryption, Compliance & Governance
+If the transcript doesn't provide enough raw material to fill all topics for a module, use "inferred": true for those topics (but STILL include them — do NOT delete the topic).
+MINIMUM 3 topics per module, TARGET 4-5 topics per module.
+
 7-SLOT EXTRACTION RULE (CRITICAL):
 For EACH topic, you must extract ALL 7 knowledge slots from the transcript:
 - concept: What is this topic in plain terms? What does the expert say it fundamentally is?
@@ -139,7 +147,7 @@ For EACH topic, you must extract ALL 7 knowledge slots from the transcript:
 
 If the transcript doesn't cover a slot for a topic, set it to null. Do NOT invent content.
 
-Return a STRICT JSON object matching this schema:
+Return a STRICT JSON object matching this schema. NOTE: The "topics" array inside each module MUST have at least 3 items. A module with 1 topic will be treated as a schema violation.
 {{
   "report_title": "Course blueprint title",
   "tutor_persona": {{
@@ -159,17 +167,47 @@ Return a STRICT JSON object matching this schema:
         "learning_outcomes": ["What the learner will be able to do after this module"],
         "topics": [
           {{
-            "topic_title": "Specific lesson name",
-            "concept": "Plain-language explanation of what this topic is",
-            "breakdown": "Step-by-step or layered explanation of how it works",
-            "edge_cases": "Non-obvious situations where this behaves differently or breaks",
-            "constraints": "Limitations, tradeoffs, or 'do not use when' rules",
-            "action_items": ["Specific hands-on steps or exercises for the learner"],
-            "evaluation_path": "How the expert tests true understanding; what mastery looks like",
-            "common_mistakes": ["Errors beginners or practitioners commonly make"],
-            "expert_story": "Verbatim summary of any personal story the expert shared about this topic",
-            "expert_heuristic": "Rule-of-thumb or IF/THEN mental model the expert stated",
-            "reference_guides": ["Books, videos, docs, or resources the expert mentioned"],
+            "topic_title": "First specific lesson name — REQUIRED",
+            "concept": "Plain-language explanation",
+            "breakdown": "Step-by-step explanation",
+            "edge_cases": "Non-obvious edge cases or null",
+            "constraints": "Limitations or null",
+            "action_items": ["Hands-on exercise 1", "Hands-on exercise 2"],
+            "evaluation_path": "What mastery looks like or null",
+            "common_mistakes": ["Mistake 1", "Mistake 2"],
+            "expert_story": "Personal story verbatim summary or null",
+            "expert_heuristic": "Rule-of-thumb or null",
+            "reference_guides": ["Resource mentioned or null"],
+            "inferred": false,
+            "inference_rationale": null
+          }},
+          {{
+            "topic_title": "Second specific lesson name — REQUIRED (at least 3 topics per module)",
+            "concept": "...",
+            "breakdown": "...",
+            "edge_cases": null,
+            "constraints": null,
+            "action_items": [],
+            "evaluation_path": null,
+            "common_mistakes": [],
+            "expert_story": null,
+            "expert_heuristic": null,
+            "reference_guides": [],
+            "inferred": true,
+            "inference_rationale": "Expert did not discuss this topic explicitly but it is logically required for the module."
+          }},
+          {{
+            "topic_title": "Third specific lesson name — REQUIRED (minimum 3 per module)",
+            "concept": "...",
+            "breakdown": "...",
+            "edge_cases": null,
+            "constraints": null,
+            "action_items": [],
+            "evaluation_path": null,
+            "common_mistakes": [],
+            "expert_story": null,
+            "expert_heuristic": null,
+            "reference_guides": [],
             "inferred": false,
             "inference_rationale": null
           }}

@@ -127,6 +127,16 @@ class SubmitEvidenceRequest(BaseModel):
     resource_mentioned: Optional[str] = ""
     what_expert_claimed: Optional[str] = ""
 
+class InsightVerifyItem(BaseModel):
+    id: str
+    status: str  # 'approved', 'modified', 'rejected'
+    title: Optional[str] = None
+    content: Optional[str] = None
+    expert_quote: Optional[str] = None
+
+class VerifyInsightsRequest(BaseModel):
+    insights: List[InsightVerifyItem]
+
 # ============================================================
 # PHASE 2: INTAKE & SCRIPT GENERATION
 # ============================================================
@@ -211,17 +221,299 @@ async def generate_script_endpoint(current_expert_id: str = Depends(get_current_
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# PHASE 3: LIVE INTERVIEW LOOP
+# PHASE 1: COURSE DISCOVERY ENGINE
+# ============================================================
+
+class CourseDiscoveryRequest(BaseModel):
+    session_id: str
+    expert_answer: str
+
+@app.post("/course-discovery-turn")
+async def course_discovery_turn_endpoint(
+    request: CourseDiscoveryRequest,
+    current_expert_id: str = Depends(get_current_expert_id)
+):
+    """
+    Phase 1 — Course Discovery Engine.
+
+    Accepts one expert answer at a time and returns the next podcast-style
+    question that naturally discovers the course identity.
+
+    Sequence: course_context → student_personas → duration_weeks → course_title.
+
+    When phase_complete=True, all four fields have been synthesized and written
+    to the existing DB columns. The frontend should transition to Module 3
+    (Module Discovery) at this point.
+    """
+    try:
+        # Ownership check
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", request.session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        result = await interview_domain.course_discovery_turn(
+            session_id=request.session_id,
+            expert_answer=request.expert_answer
+        )
+        return {"status": "success", **result}
+    except Exception as e:
+        logger.error(f"Course discovery turn error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# PHASE 2: MODULE DISCOVERY ENGINE
+# ============================================================
+
+class ModuleDiscoveryRequest(BaseModel):
+    session_id: str
+    expert_answer: str
+
+@app.post("/module-discovery-turn")
+async def module_discovery_turn_endpoint(
+    request: ModuleDiscoveryRequest,
+    current_expert_id: str = Depends(get_current_expert_id)
+):
+    """
+    Phase 2 — Module Discovery Engine.
+
+    Accepts one expert answer at a time and discovers module titles
+    through natural podcast-style conversation.
+
+    Owns ONLY module_title. Never touches topics, context, or other fields.
+
+    Includes a Curriculum Saturation Check before exit:
+    - If saturation passes → phase_complete=True, modules persisted to DB.
+    - If saturation fails  → a recovery question is returned.
+
+    When phase_complete=True, the frontend should transition to per-module
+    topic extraction (live-turn with Module Discovery in script).
+    """
+    try:
+        # Ownership check
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", request.session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        result = await interview_domain.module_discovery_turn(
+            session_id=request.session_id,
+            expert_answer=request.expert_answer
+        )
+        return {"status": "success", **result}
+    except Exception as e:
+        logger.error(f"Module discovery turn error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# PHASE 3: MODULE ENRICHMENT ENGINE
+# ============================================================
+
+class ModuleEnrichmentRequest(BaseModel):
+    session_id: str
+    expert_answer: str
+
+@app.post("/module-enrichment-turn")
+async def module_enrichment_turn_endpoint(
+    request: ModuleEnrichmentRequest,
+    current_expert_id: str = Depends(get_current_expert_id)
+):
+    """
+    Phase 3 — Module Enrichment Engine.
+
+    Enriches modules one-by-one with:
+      - module_context    (why this module exists)
+      - learning_outcomes (what learners become capable of)
+      - module_constraints (prerequisites and learning boundaries)
+
+    Owns ONLY these three fields. Never touches topics.
+
+    Advances automatically to the next module when the current one
+    is fully enriched. Signals phase_complete=True when all modules
+    have been enriched.
+
+    Response includes current_module_idx / total_modules so the
+    frontend can render a progress indicator.
+    """
+    try:
+        # Ownership check
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", request.session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        result = await interview_domain.module_enrichment_turn(
+            session_id=request.session_id,
+            expert_answer=request.expert_answer
+        )
+        return {"status": "success", **result}
+    except Exception as e:
+        logger.error(f"Module enrichment turn error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# PHASE 4: TOPIC DISCOVERY ENGINE
+# ============================================================
+
+class TopicDiscoveryRequest(BaseModel):
+    session_id: str
+    expert_answer: str
+
+@app.post("/topic-discovery-turn")
+async def topic_discovery_turn_endpoint(
+    request: TopicDiscoveryRequest,
+    current_expert_id: str = Depends(get_current_expert_id)
+):
+    """
+    Phase 4 — Topic Discovery Engine.
+
+    Discovers topic_titles for each module, one module at a time.
+    Owns ONLY topics[].topic_title — never touches any deeper field.
+
+    Exit gate: Learning Outcome Coverage Validator cross-checks every
+    discovered topic against every module learning_outcome before advancing.
+    If any outcome is uncovered, a recovery question is returned.
+
+    Returns current_module_idx / total_modules for frontend progress bar.
+    phase_complete=True when every module has its full topic list validated.
+    """
+    try:
+        # Ownership check
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", request.session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        result = await interview_domain.topic_discovery_turn(
+            session_id=request.session_id,
+            expert_answer=request.expert_answer
+        )
+        return {"status": "success", **result}
+    except Exception as e:
+        logger.error(f"Topic discovery turn error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# PHASE 5: CURRICULUM VALIDATION & LOCK ENGINE
+# ============================================================
+
+class CurriculumValidationRequest(BaseModel):
+    session_id: str
+
+@app.post("/curriculum-validation")
+async def curriculum_validation_endpoint(
+    request: CurriculumValidationRequest,
+    current_expert_id: str = Depends(get_current_expert_id)
+):
+    """
+    Phase 5 — Curriculum Validation & Lock Engine.
+
+    Validates the entire curriculum structure and decides whether to lock.
+    Does NOT conduct interviews or accept/generate follow-up questions.
+
+    Returns the lock decision, detailed validation report, and next_state.
+    """
+    try:
+        # Ownership check
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", request.session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        result = await interview_domain.validate_and_lock_curriculum(
+            session_id=request.session_id
+        )
+        return {"status": "success", **result}
+    except Exception as e:
+        logger.error(f"Curriculum validation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# PHASE 6: TOPIC INITIALIZATION ENGINE
+# ============================================================
+
+class TopicInitializationRequest(BaseModel):
+    session_id: str
+    expert_answer: Optional[str] = None
+
+@app.post("/topic-initialization")
+async def topic_initialization_endpoint(
+    request: TopicInitializationRequest,
+    current_expert_id: str = Depends(get_current_expert_id)
+):
+    """
+    Phase 6 — Topic Initialization Engine.
+
+    Prepares the interview for exploring exactly one incomplete topic.
+    Selects the next highest-priority incomplete topic and returns a
+    warm conversationaltransition question.
+
+    Sets state: current_module, current_topic, status = "IN_PROGRESS".
+    """
+    try:
+        # Ownership check
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", request.session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        result = await interview_domain.topic_initialization_turn(
+            session_id=request.session_id,
+            expert_answer=request.expert_answer
+        )
+        return {"status": "success", **result}
+    except Exception as e:
+        logger.error(f"Topic initialization error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# PHASE 7-11: TOPIC KNOWLEDGE EXPLORATION ENGINE
+# ============================================================
+
+class TopicExplorationRequest(BaseModel):
+    session_id: str
+    expert_answer: str
+
+@app.post("/topic-exploration")
+async def topic_exploration_endpoint(
+    request: TopicExplorationRequest,
+    current_expert_id: str = Depends(get_current_expert_id)
+):
+    """
+    Phase 7-11 — Topic Knowledge Exploration Engine.
+
+    Accepts the expert's answer and evaluates coverage, manages gaps,
+    transitions through the 5 natural conversation lenses, and extracts
+    structured JSON to the blueprint once the topic is completed.
+
+    Lenses: understanding → teaching → failure → experience → mastery.
+    """
+    try:
+        # Ownership check
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", request.session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        result = await interview_domain.topic_exploration_turn(
+            session_id=request.session_id,
+            expert_answer=request.expert_answer
+        )
+        return {"status": "success", **result}
+    except Exception as e:
+        logger.error(f"Topic exploration error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# PHASE 12: LIVE INTERVIEW LOOP
 # ============================================================
 
 @app.get("/session/{session_id}")
 async def get_session_endpoint(session_id: str, current_expert_id: str = Depends(get_current_expert_id)):
-    """Fetch session data including the generated script."""
+    """Fetch session data including the generated script and topic progress."""
     try:
         res = supabase.table("interview_sessions").select("*").eq("id", session_id).execute()
         if not res.data or res.data[0]["expert_id"] != current_expert_id:
             raise HTTPException(status_code=404, detail="Session not found")
-        return {"status": "success", "session": res.data[0]}
+        tp_res = supabase.table("topic_progress").select("*").eq("session_id", session_id).execute()
+        return {
+            "status": "success",
+            "session": res.data[0],
+            "topic_progress": tp_res.data or []
+        }
     except Exception as e:
         logger.error(f"Get session error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -252,12 +544,56 @@ async def live_turn_endpoint(request: LiveTurnRequest, background_tasks: Backgro
             request.expert_answer,
             embeddings_model
         )
-        # NOTE: Scratchpad update now runs synchronously inside live_turn()
-        # using llm_fast. Removed from background tasks to prevent stale memory.
+        
+        # Fetch updated topic progress checklist
+        tp_res = supabase.table("topic_progress").select("*").eq("session_id", request.session_id).execute()
+        result["topic_progress"] = tp_res.data or []
 
         return result
     except Exception as e:
         logger.error(f"Live turn error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/insights/{session_id}")
+async def get_insights_endpoint(session_id: str, current_expert_id: str = Depends(get_current_expert_id)):
+    """Fetch granular insights extracted for verification."""
+    try:
+        # Check ownership of session
+        session_res = supabase.table("interview_sessions").select("expert_id").eq("id", session_id).execute()
+        if not session_res.data or session_res.data[0]["expert_id"] != current_expert_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        res = supabase.table("expert_tacit_insights").select("*").eq("session_id", session_id).execute()
+        return {"status": "success", "insights": res.data or []}
+    except Exception as e:
+        logger.error(f"Get insights error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/insights/verify")
+async def verify_insights_endpoint(request: VerifyInsightsRequest, current_expert_id: str = Depends(get_current_expert_id)):
+    """Submit verifications (Approve/Reject/Modify) for extracted insights."""
+    try:
+        for item in request.insights:
+            # Check ownership of the insight first
+            insight_res = supabase.table("expert_tacit_insights").select("expert_id").eq("id", item.id).execute()
+            if not insight_res.data or insight_res.data[0]["expert_id"] != current_expert_id:
+                continue
+            
+            update_data = {
+                "status": item.status
+            }
+            if item.title:
+                update_data["title"] = item.title
+            if item.content:
+                update_data["content"] = item.content
+            if item.expert_quote:
+                update_data["expert_quote"] = item.expert_quote
+
+            supabase.table("expert_tacit_insights").update(update_data).eq("id", item.id).execute()
+
+        return {"status": "success", "message": "Insights verification updated successfully."}
+    except Exception as e:
+        logger.error(f"Verify insights error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/transcribe")
