@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import json
 import re
 import logging
@@ -61,28 +60,6 @@ from prompts import (
     KNOWLEDGE_GAP_MANAGER_PROMPT,
     TOPIC_TRANSITION_PROMPT
 )
-from prompts.conversation_intelligence import (
-    CONVERSATION_DIRECTOR_PROMPT,
-    STRATEGY_ENGINE_PROMPT,
-    REPETITION_DETECTOR_PROMPT,
-    BRIDGE_ENGINE_PROMPT,
-    REFLECTION_ENGINE_PROMPT,
-    CONVERSATION_MEMORY_PROMPT,
-    PODCAST_PERSONALITY_PROMPT,
-    INTERVIEW_PRODUCER_PROMPT,
-    LESSON_INITIALIZER_PROMPT,
-    LESSON_COVERAGE_CONTROLLER_PROMPT,
-    TACIT_OPPORTUNITY_DETECTOR_PROMPT,
-    KNOWLEDGE_EXTRACTION_ENGINE_PROMPT,
-)
-
-REFLECTION_STYLE_ROTATION = [
-    "Curiosity",
-    "Connection",
-    "Synthesis",
-    "Comparison",
-    "Validation"
-]
 
 logger = logging.getLogger(__name__)
 
@@ -124,378 +101,6 @@ class InterviewDomain(BaseDomain):
                 for m in re.finditer(r'"(\w+)"\s*:\s*"([^"]*)"', cl):
                     res[m.group(1)] = m.group(2)
             return res
-
-    def _get_recent_questions(self, raw_transcript: str, n: int = 8) -> str:
-        """Extract the last N questions asked by the AI from the transcript."""
-        lines = raw_transcript.split("\n")
-        questions = []
-        for line in lines:
-            line = line.strip()
-            if line.startswith("[AI JOURNALIST]:"):
-                q = line.replace("[AI JOURNALIST]:", "").strip()
-                if q:
-                    questions.append(q)
-        recent = questions[-n:] if len(questions) >= n else questions
-        return "\n".join(f"{i+1}. {q}" for i, q in enumerate(recent)) if recent else "(No questions asked yet)"
-
-    def _detect_answer_tone(self, expert_answer: str) -> str:
-        """Heuristically detect the tone of the expert's last answer."""
-        answer_lower = expert_answer.lower()
-        word_count = len(expert_answer.split())
-        if word_count < 20:
-            return "brief"
-        story_signals = ["i remember", "we had", "once", "there was", "at the time", "it was a", "that was when"]
-        if any(s in answer_lower for s in story_signals):
-            return "storytelling"
-        reflective_signals = ["i think", "i believe", "in my experience", "i've found", "i feel"]
-        if any(s in answer_lower for s in reflective_signals):
-            return "reflective"
-        if word_count > 120:
-            return "detailed"
-        return "conversational"
-
-    async def _run_conversation_intelligence(
-        self,
-        phase_name: str,
-        current_target: str,
-        missing_fields: List[str],
-        turn_number: int,
-        conversation_history: str,
-        expert_answer: str,
-        active_lens: str = "",
-        previous_move: str = "",
-        conversation_memory: dict = None,
-    ) -> Dict[str, Any]:
-        """
-        Runs the Director → Strategy Engine pipeline.
-        Returns a dict with: move, strategy, conversation_angle, style_note,
-        energy_note, avoid, reflection_style.
-        """
-        energy = "HIGH" if len(expert_answer.split()) > 80 else ("LOW" if len(expert_answer.split()) < 25 else "MEDIUM")
-        answer_tone = self._detect_answer_tone(expert_answer)
-
-        # Step 1: Conversation Director
-        director_result = {"move": "CONTINUE", "reasoning": "", "energy_note": "", "avoid": []}
-        try:
-            dir_res = await self.llm_fast.ainvoke(
-                CONVERSATION_DIRECTOR_PROMPT.format(
-                    phase_name=phase_name,
-                    current_target=current_target,
-                    active_lens=active_lens or "N/A",
-                    missing_fields=json.dumps(missing_fields),
-                    turn_number=turn_number,
-                    energy=energy,
-                    answer_tone=answer_tone,
-                    conversation_history=conversation_history,
-                    previous_move=previous_move or "None",
-                    conversation_memory=json.dumps(conversation_memory or {}),
-                )
-            )
-            director_result = self._parse_json(dir_res.content) or director_result
-        except Exception as e:
-            logger.warning(f"Conversation Director failed: {e}")
-
-        move = director_result.get("move", "CONTINUE")
-        energy_note = director_result.get("energy_note", "")
-        avoid_list = director_result.get("avoid", [])
-
-        # Step 2: Strategy Engine
-        strategy_result = {"strategy": "Reflection", "style_note": "", "conversation_angle": ""}
-        try:
-            strat_res = await self.llm_fast.ainvoke(
-                STRATEGY_ENGINE_PROMPT.format(
-                    move=move,
-                    missing_fields=json.dumps(missing_fields),
-                    avoid_list=json.dumps(avoid_list),
-                    energy_note=energy_note,
-                )
-            )
-            strategy_result = self._parse_json(strat_res.content) or strategy_result
-        except Exception as e:
-            logger.warning(f"Strategy Engine failed: {e}")
-
-        # Determine reflection style
-        turn_idx = turn_number % len(REFLECTION_STYLE_ROTATION)
-        reflection_style = REFLECTION_STYLE_ROTATION[turn_idx]
-        if move == "CHALLENGE":
-            reflection_style = "Challenge"
-        elif move == "STORY":
-            reflection_style = "Curiosity"
-        elif move == "COMPARE":
-            reflection_style = "Connection"
-
-        return {
-            "move": move,
-            "strategy": strategy_result.get("strategy", "Reflection"),
-            "style_note": strategy_result.get("style_note", ""),
-            "conversation_angle": strategy_result.get("conversation_angle", ""),
-            "energy_note": energy_note,
-            "avoid": avoid_list,
-            "reflection_style": reflection_style,
-        }
-
-    async def _run_repetition_detector(
-        self,
-        proposed_question: str,
-        raw_transcript: str,
-        information_need: str,
-    ) -> str:
-        """Runs the Repetition Detector on a proposed question."""
-        recent_questions = self._get_recent_questions(raw_transcript, n=8)
-        try:
-            rep_res = await self.llm_fast.ainvoke(
-                REPETITION_DETECTOR_PROMPT.format(
-                    proposed_question=proposed_question,
-                    recent_questions=recent_questions,
-                    information_need=information_need,
-                )
-            )
-            rep_data = self._parse_json(rep_res.content)
-            if rep_data.get("is_repetitive") and rep_data.get("rewritten_question"):
-                logger.info(
-                    f"Repetition Detector rewrote question: {rep_data['rewritten_question'][:80]}..."
-                )
-                return rep_data["rewritten_question"]
-        except Exception as e:
-            logger.warning(f"Repetition Detector failed: {e}")
-        return proposed_question
-
-    async def _run_bridge_engine(
-        self,
-        completed_target: str,
-        next_target: str,
-        transition_type: str,
-        raw_transcript: str,
-        modules_done: int,
-        total_targets: int,
-    ) -> str:
-        """Generates a natural bridge transition using the Bridge Engine."""
-        lines = raw_transcript.strip().split("\n")
-        expert_lines = [l.replace("[EXPERT]:", "").strip() for l in lines if l.strip().startswith("[EXPERT]:")]
-        key_insight = expert_lines[-1][:200] if expert_lines else ""
-
-        fallback = (
-            f'What\'s interesting is everything we\'ve mapped out in "{completed_target}" '
-            f'sits inside one chapter of this journey. The next one, "{next_target}", '
-            f'takes things further — what\'s the first shift a learner would feel moving into it?'
-        )
-        try:
-            bridge_res = await self.llm.ainvoke(
-                BRIDGE_ENGINE_PROMPT.format(
-                    completed_target=completed_target,
-                    next_target=next_target,
-                    transition_type=transition_type,
-                    modules_done=modules_done,
-                    total_targets=total_targets,
-                    key_insight=key_insight,
-                )
-            )
-            bridge_data = self._parse_json(bridge_res.content)
-            bridge_sentence = bridge_data.get("bridge_sentence", "").strip()
-            opening_question = bridge_data.get("opening_question", "").strip()
-            if bridge_sentence and opening_question:
-                return f"{bridge_sentence} {opening_question}"
-            elif opening_question:
-                return opening_question
-        except Exception as e:
-            logger.warning(f"Bridge Engine failed: {e}")
-        return fallback
-
-    def _deduplicate_modules(self, course_modules: List[Dict]) -> List[Dict]:
-        """Deduplicates course modules by stripping prefixes and merging fields."""
-        seen_normalized = {}
-        cleaned_list = []
-        
-        for mod in course_modules:
-            title = mod.get("module_title", "").strip()
-            if not title:
-                continue
-                
-            # Strip prefixes like "Module 1:", "Module 1 -", "1. ", etc.
-            normalized_title = re.sub(r'^(?:module\s+\d+[:\-\s]*|\d+[\.\-\s]+)', '', title, flags=re.IGNORECASE).strip()
-            
-            # Key by lowercase normalized title
-            key = normalized_title.lower()
-            
-            if key not in seen_normalized:
-                new_mod = {
-                    "module_title": normalized_title, # use clean title
-                    "module_context": mod.get("module_context") or "",
-                    "learning_outcomes": mod.get("learning_outcomes") or [],
-                    "module_constraints": mod.get("module_constraints") or [],
-                    "topics": mod.get("topics") or []
-                }
-                seen_normalized[key] = new_mod
-                cleaned_list.append(new_mod)
-            else:
-                # Merge fields if they have content
-                existing = seen_normalized[key]
-                if not existing["module_context"] and mod.get("module_context"):
-                    existing["module_context"] = mod["module_context"]
-                if not existing["learning_outcomes"] and mod.get("learning_outcomes"):
-                    existing["learning_outcomes"] = mod["learning_outcomes"]
-                if not existing["module_constraints"] and mod.get("module_constraints"):
-                    existing["module_constraints"] = mod["module_constraints"]
-                if not existing["topics"] and mod.get("topics"):
-                    existing["topics"] = mod["topics"]
-                    
-        return cleaned_list
-
-    async def _run_conversation_memory(
-        self,
-        conversation_history: str,
-        expert_answer: str,
-        previous_memory: dict
-    ) -> dict:
-        """Runs the Conversation Memory updater on the latest turn."""
-        try:
-            mem_res = await self.llm_fast.ainvoke(
-                CONVERSATION_MEMORY_PROMPT.format(
-                    conversation_history=conversation_history,
-                    last_expert_answer=expert_answer,
-                    previous_memory=json.dumps(previous_memory or {})
-                )
-            )
-            updated_mem = self._parse_json(mem_res.content)
-            if updated_mem:
-                return updated_mem
-        except Exception as e:
-            logger.warning(f"Conversation Memory Engine failed: {e}")
-        return previous_memory or {}
-
-    async def _run_interview_producer(
-        self,
-        current_target: str,
-        active_lens: str,
-        conversation_history: str,
-        conversation_memory: dict
-    ) -> str:
-        """Runs the Interview Producer to detect overrides."""
-        try:
-            prod_res = await self.llm_fast.ainvoke(
-                INTERVIEW_PRODUCER_PROMPT.format(
-                    current_target=current_target,
-                    active_lens=active_lens or "N/A",
-                    conversation_history=conversation_history,
-                    conversation_memory=json.dumps(conversation_memory or {})
-                )
-            )
-            prod_data = self._parse_json(prod_res.content)
-            override = str(prod_data.get("override_move", "None")).upper().strip()
-            if override in ["CHALLENGE", "STORY", "FUTURE"] and override != "NONE":
-                logger.info(f"Interview Producer triggered move override: {override} (Reason: {prod_data.get('reason', '')})")
-                return override
-        except Exception as e:
-            logger.warning(f"Interview Producer failed: {e}")
-        return "NONE"
-
-    async def _run_lesson_initializer(
-        self,
-        module_title: str,
-        topic_title: str
-    ) -> Dict[str, Any]:
-        """Runs the Lesson Initializer to classify the Arc and generate the introductory bridge."""
-        try:
-            res = await self.llm.ainvoke(
-                LESSON_INITIALIZER_PROMPT.format(
-                    module_title=module_title,
-                    topic_title=topic_title
-                )
-            )
-            data = self._parse_json(res.content)
-            if data:
-                return data
-        except Exception as e:
-            logger.warning(f"Lesson Initializer failed: {e}")
-        return {
-            "arc": "UNDERSTANDING",
-            "reason": "Fallback to default arc.",
-            "introduction": f"Let's dive into {topic_title} under {module_title}."
-        }
-
-    async def _run_coverage_controller(
-        self,
-        topic_title: str,
-        transcript: str
-    ) -> Dict[str, Any]:
-        """Runs the Coverage Controller to assign percentages to components."""
-        try:
-            res = await self.llm_fast.ainvoke(
-                LESSON_COVERAGE_CONTROLLER_PROMPT.format(
-                    topic_title=topic_title,
-                    transcript=transcript
-                )
-            )
-            data = self._parse_json(res.content)
-            if data:
-                return data
-        except Exception as e:
-            logger.warning(f"Lesson Coverage Controller failed: {e}")
-        return {
-            "coverage": {
-                "concept": 50,
-                "breakdown": 0,
-                "mistakes": 0,
-                "stories": 0,
-                "heuristics": 0,
-                "evaluation": 0
-            },
-            "missing_components": ["breakdown", "mistakes", "stories", "heuristics", "evaluation"]
-        }
-
-    async def _run_tacit_opportunity_detector(
-        self,
-        last_expert_answer: str,
-        conversation_history: str
-    ) -> Dict[str, Any]:
-        """Runs the Tacit Opportunity Detector to identify goldmines."""
-        try:
-            res = await self.llm_fast.ainvoke(
-                TACIT_OPPORTUNITY_DETECTOR_PROMPT.format(
-                    last_expert_answer=last_expert_answer,
-                    conversation_history=conversation_history
-                )
-            )
-            data = self._parse_json(res.content)
-            if data:
-                return data
-        except Exception as e:
-            logger.warning(f"Tacit Opportunity Detector failed: {e}")
-        return {
-            "opportunity_detected": False,
-            "goldmine_type": "None",
-            "deep_dive_question": ""
-        }
-
-    async def _run_knowledge_extraction_engine(
-        self,
-        topic_title: str,
-        transcript: str
-    ) -> Dict[str, Any]:
-        """Silent knowledge extraction to JSON schema formats."""
-        try:
-            res = await self.llm.ainvoke(
-                KNOWLEDGE_EXTRACTION_ENGINE_PROMPT.format(
-                    topic_title=topic_title,
-                    transcript=transcript
-                )
-            )
-            data = self._parse_json(res.content)
-            if data:
-                return data
-        except Exception as e:
-            logger.warning(f"Silent Knowledge Extraction failed: {e}")
-        return {
-            "concept": "",
-            "breakdown": "",
-            "constraints": "",
-            "edge_cases": "",
-            "action_items": [],
-            "common_mistakes": [],
-            "evaluation_path": "",
-            "expert_heuristic": "",
-            "expert_story": ""
-        }
 
     async def intake(self, expert_id: str) -> Dict[str, Any]:
         expert = await self._get_expert(expert_id)
@@ -1199,17 +804,87 @@ TRANSITION & DIVERSITY CONTROLS:
         total_modules  = len(course_modules)
 
         # ── Self-Healing Curriculum Dedup & Reordering Block ──────────────
-        cleaned_modules = self._deduplicate_modules(course_modules)
-        if len(cleaned_modules) != len(course_modules) or any(
-            c.get("module_title") != o.get("module_title") for c, o in zip(cleaned_modules, course_modules)
-        ):
-            logger.info("Self-healing: duplicate or differently-prefixed curriculum modules detected. Cleaning up and merging...")
+        needs_dedup = False
+        if len(course_modules) > 8:
+            needs_dedup = True
+            
+        if needs_dedup:
+            logger.info("Self-healing: duplicate curriculum modules detected. Cleaning up and merging...")
+            MAP = {
+                "backend foundations": "Backend Engineering Foundations",
+                "backend engineering foundations": "Backend Engineering Foundations",
+                "building reliable services": "Building Production-Ready Services",
+                "building production-ready services": "Building Production-Ready Services",
+                "operating production systems": "Operating Backend Systems",
+                "operating backend systems": "Operating Backend Systems",
+                "system design & distributed architecture": "System Design & Distributed Systems",
+                "system design & distributed systems": "System Design & Distributed Systems",
+                "performance, scalability & reliability": "Performance, Scalability & Reliability",
+                "engineering judgment": "Engineering Judgment & Architecture",
+                "engineering judgment & architecture": "Engineering Judgment & Architecture",
+                "owning production systems": "Production Ownership",
+                "production ownership": "Production Ownership",
+                "technical leadership & professional engineering": "Technical Leadership & Professional Engineering"
+            }
+            ORDER = [
+                "Backend Engineering Foundations",
+                "Building Production-Ready Services",
+                "Operating Backend Systems",
+                "System Design & Distributed Systems",
+                "Performance, Scalability & Reliability",
+                "Engineering Judgment & Architecture",
+                "Production Ownership",
+                "Technical Leadership & Professional Engineering"
+            ]
+            
+            # Group and merge by mapped title
+            merged_modules = {}
+            for mod in course_modules:
+                orig_title = mod.get("module_title", "")
+                mapped_title = MAP.get(orig_title.lower().strip(), orig_title)
+                
+                if mapped_title not in merged_modules:
+                    merged_modules[mapped_title] = {
+                        "module_title": mapped_title,
+                        "module_context": mod.get("module_context", ""),
+                        "learning_outcomes": mod.get("learning_outcomes", []),
+                        "module_constraints": mod.get("module_constraints", []),
+                        "topics": mod.get("topics", [])
+                    }
+                else:
+                    # Merge fields if they have content
+                    curr = merged_modules[mapped_title]
+                    if not curr["module_context"] and mod.get("module_context"):
+                        curr["module_context"] = mod["module_context"]
+                    if not curr["learning_outcomes"] and mod.get("learning_outcomes"):
+                        curr["learning_outcomes"] = mod["learning_outcomes"]
+                    if not curr["module_constraints"] and mod.get("module_constraints"):
+                        curr["module_constraints"] = mod["module_constraints"]
+                    if not curr["topics"] and mod.get("topics"):
+                        curr["topics"] = mod["topics"]
+            
+            # Reconstruct list in exact ORDER
+            new_modules_list = []
+            for title in ORDER:
+                if title in merged_modules:
+                    new_modules_list.append(merged_modules[title])
+                else:
+                    new_modules_list.append({
+                        "module_title": title,
+                        "module_context": "",
+                        "learning_outcomes": [],
+                        "module_constraints": [],
+                        "topics": []
+                    })
+            
+            # Persist clean list
             try:
                 self.supabase.table("curriculum_blueprints").update({
-                    "course_modules": cleaned_modules
+                    "course_modules": new_modules_list
                 }).eq("expert_id", session["expert_id"]).execute()
                 
-                course_modules = cleaned_modules
+                # Replace our local reference
+                course_modules = new_modules_list
                 total_modules = len(course_modules)
                 
                 # Find first incomplete module index
@@ -1218,7 +893,8 @@ TRANSITION & DIVERSITY CONTROLS:
                     if not mod.get("module_context") or not mod.get("learning_outcomes"):
                         first_incomplete = idx
                         break
-                        
+                
+                # Update scratchpad pointer
                 scratchpad = session.get("live_scratchpad", {})
                 enrich_idx = first_incomplete
                 scratchpad["enrichment_module_idx"] = enrich_idx
@@ -1244,9 +920,6 @@ TRANSITION & DIVERSITY CONTROLS:
             "learning_outcomes": False,
             "module_constraints": False
         })
-        
-        enrich_turn_count = scratchpad.get("enrichment_turn_count", 0) + 1
-        scratchpad["enrichment_turn_count"] = enrich_turn_count
 
         if total_modules == 0:
             raise HTTPException(status_code=400, detail="No modules discovered yet. Complete Phase 2 first.")
@@ -1281,18 +954,6 @@ TRANSITION & DIVERSITY CONTROLS:
                 return {}
 
         conv_history = self._build_conversation_history(raw_transcript, max_turns=6)
-
-        # ── 4.1. Update Conversation Memory (Sprint 3) ──
-        memory = scratchpad.get("conversation_memory", {})
-        memory = await self._run_conversation_memory(
-            conversation_history=conv_history,
-            expert_answer=expert_answer,
-            previous_memory=memory
-        )
-        scratchpad["conversation_memory"] = memory
-        self.supabase.table("interview_sessions").update({
-            "live_scratchpad": scratchpad
-        }).eq("id", session_id).execute()
 
         # ── 4.5. Curriculum Classification (Phase 2.5) ──────────────────
         classification = "OTHER"
@@ -1446,15 +1107,13 @@ TRANSITION & DIVERSITY CONTROLS:
                     "phase_complete":     True
                 }
 
-            # Not done yet — generate opener for the next module via Bridge Engine
+            # Not done yet — generate opener for the next module
             next_module_title = course_modules[next_idx].get("module_title", f"Module {next_idx + 1}")
-            transition_q = await self._run_bridge_engine(
-                completed_target=current_module_title,
-                next_target=next_module_title,
-                transition_type="MODULE",
-                raw_transcript=raw_transcript,
-                modules_done=next_idx,
-                total_targets=total_modules,
+            transition_q = (
+                f"Great. That gives us a really clear picture of what \"{current_module_title}\" "
+                f"is all about. Let's move to the next module: \"{next_module_title}\". "
+                f"In the context of the overall course, what role does this stage play "
+                f"in the learner's journey?"
             )
             raw_transcript += f"\n\n[AI JOURNALIST]: {transition_q}"
             self.supabase.table("interview_sessions").update({
@@ -1472,7 +1131,7 @@ TRANSITION & DIVERSITY CONTROLS:
                 "phase_complete":     False
             }
 
-        # ── 6b. IN PROGRESS: Conversation Intelligence Layer → Question Generator ──
+        # ── 6b. IN PROGRESS: Transition & Conversation Diversity Controllers ──
         # Find next field to discover
         current_enrich_field = "module_context"
         if field_status.get("module_context"):
@@ -1480,37 +1139,18 @@ TRANSITION & DIVERSITY CONTROLS:
         if field_status.get("module_context") and field_status.get("learning_outcomes"):
             current_enrich_field = "module_constraints"
 
-        missing_fields = [f for f, done in field_status.items() if not done]
-        turn_count = len([l for l in raw_transcript.split("\n") if l.startswith("[EXPERT]:")])
-
         next_question = f"What role does \"{current_module_title}\" play in the overall learning journey?"
         try:
-            # ── Step A0: Run Interview Producer (Sprint 4) ──
-            producer_move = await self._run_interview_producer(
-                current_target=current_module_title,
-                active_lens="N/A",
-                conversation_history=conv_history,
-                conversation_memory=memory
-            )
+            # Dynamic Reflection Style Rotation (Diversity Controller)
+            reflection_styles = [
+                "Insight reflection: Reflect conceptually on the purpose and outcomes of this module.",
+                "Mindset reflection: Focus on how this module reduces the developer's stress or shifts their confidence.",
+                "Contrast reflection: Contrast this module's goals with the typical tutorials that fail in production.",
+                "Connection reflection: Connect this module to the overall transformation of 'programmer to systems engineer'."
+            ]
+            turn_count = len([l for l in raw_transcript.split("\n") if l.startswith("[EXPERT]:")])
+            selected_style = reflection_styles[turn_count % len(reflection_styles)]
 
-            # ── Step A: Run Conversation Intelligence (Director + Strategy) ──
-            prev_move = scratchpad.get("previous_move", "")
-            ci = await self._run_conversation_intelligence(
-                phase_name="Module Enrichment",
-                current_target=current_module_title,
-                missing_fields=missing_fields,
-                turn_number=turn_count,
-                conversation_history=conv_history,
-                expert_answer=expert_answer,
-                previous_move=prev_move,
-                conversation_memory=memory,
-            )
-            # Override move if Producer triggered one
-            if producer_move != "NONE":
-                ci["move"] = producer_move
-            scratchpad["previous_move"] = ci["move"]
-
-            # ── Step B: Run Curriculum Engine with CI context injected ──
             prompt_content = MODULE_ENRICHMENT_ENGINE_PROMPT.format(
                 course_title=expert.get("course_title", "this course"),
                 course_context=expert.get("course_description", ""),
@@ -1519,67 +1159,39 @@ TRANSITION & DIVERSITY CONTROLS:
                 total_modules=total_modules,
                 current_module_title=current_module_title,
                 field_status=json.dumps({
-                    "module_context":     field_status["module_context"],
-                    "learning_outcomes":  field_status["learning_outcomes"],
+                    "module_context":    field_status["module_context"],
+                    "learning_outcomes": field_status["learning_outcomes"],
                     "module_constraints": field_status["module_constraints"]
                 }, indent=2),
                 conversation_history=conv_history,
                 expert_answer=expert_answer
             )
 
+            # Suffix injection for transition & diversity controls
             prompt_content += f"""
 
-CONVERSATION INTELLIGENCE DIRECTIVE:
-- Target Field:        {current_enrich_field}
-- Conversational Move: {ci['move']}
-- Strategy:            {ci['strategy']}
-- Conversation Angle:  {ci['conversation_angle']}
-- Style Note:          {ci['style_note']}
-- Energy Note:         {ci['energy_note']}
-- Avoid:               {json.dumps(ci['avoid'])}
-- Reflection Style:    {ci['reflection_style']}
-- Conversation Memory: {json.dumps(memory, indent=2)}
-
-IMPORTANT: Use the Strategy and Conversation Angle above to shape your question.
-Do NOT ask for '{current_enrich_field}' directly. Extract it naturally through the chosen strategy.
-Reference earlier ideas, stories, or threads from the Conversation Memory where appropriate to connect your question back to their previous answers, making it sound like a cohesive podcast episode.
-
-BANNED OPENINGS (Do NOT use unless absolutely necessary):
-- "What do you think..."
-- "Can you explain..."
-- "What are the key factors..."
-- "How would you..."
-
-ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podcast):
-- "Something you just said caught my attention..."
-- "That reminds me of something I've heard from other engineers..."
-- "I'm curious about one part of that..."
-- "It sounds like there's a shift happening here..."
-- "You mentioned something interesting earlier..."
-- "Let's stay with that idea for a moment..."
-- "I'm wondering if that's where many engineers struggle..."
+TRANSITION & DIVERSITY CONTROLS:
+- You are strictly discovering '{current_enrich_field}' for module '{current_module_title}'. You MUST focus your single follow-up question entirely on discovering '{current_enrich_field}'. Do NOT ask about any other field.
+- If target is 'learning_outcomes', ask what concrete skills they will prove or build.
+- If target is 'module_constraints', ask about boundaries, rules, or what is deliberately left out.
+- Use this reflection style: {selected_style}.
+- CRITICAL: Never start your reflection with generic template phrases (e.g. 'You've highlighted...', 'You've beautifully described...'). Make it sound like a natural, unique conversational bridge.
 """
-            exp_res = await self.llm.ainvoke(prompt_content)
-            exp_data = _parse_json(exp_res.content)
-            reflection = str(exp_data.get("reflection", "")).strip()
-            question   = str(exp_data.get("next_question") or exp_data.get("question") or "").strip()
+            enrich_res = await self.llm.ainvoke(prompt_content)
+            enrich_data = self._parse_json(enrich_res.content)
+            reflection  = enrich_data.get("reflection", "").strip()
+            question    = enrich_data.get("question", "").strip()
             if reflection and question:
                 next_question = f"{reflection} {question}"
             elif question:
                 next_question = question
-            elif reflection:
-                next_question = reflection
-
-            # ── Step C: Repetition Detector (final gate) ──
-            next_question = await self._run_repetition_detector(
-                proposed_question=next_question,
-                raw_transcript=raw_transcript,
-                information_need=f"{current_enrich_field} components of module '{current_module_title}'",
-            )
         except Exception as e:
-            logger.warning(f"Phase 3 Module Enrichment Question failed: {e}")
+            logger.warning(f"Phase 3 question generation failed: {e}")
 
         raw_transcript += f"\n\n[AI JOURNALIST]: {next_question}"
+        scratchpad["enrichment_field_status"] = field_status
+        scratchpad["enrichment_module_idx"]   = enrich_idx
+
         self.supabase.table("interview_sessions").update({
             "raw_transcript":  raw_transcript,
             "live_scratchpad": scratchpad
@@ -1590,11 +1202,21 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
             "current_module":     current_module_title,
             "current_module_idx": enrich_idx,
             "total_modules":      total_modules,
-            "active_field":       current_enrich_field,
-            "field_complete":     False,
+            "field_status":       field_status,
             "module_complete":    False,
             "phase_complete":     False
         }
+
+    # =========================================================================
+    # PHASE 4 — TOPIC DISCOVERY ENGINE
+    # =========================================================================
+    # Runs AFTER Phase 3 (all modules enriched). Operates module-by-module.
+    #
+    # Owns ONLY: topics[].topic_title
+    # Exit gate: Learning Outcome Coverage Validator must confirm all outcomes
+    # are supported before advancing to next module.
+    # Writes to: curriculum_blueprints.course_modules[idx]["topics"]
+    # =========================================================================
 
     async def topic_discovery_turn(
         self,
@@ -1602,9 +1224,11 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
         expert_answer: str
     ) -> Dict[str, Any]:
         """
-        Process one turn of Phase 4 Curriculum Mapping.
-        Collects the entire lesson outline of the module in Turn 1, validates it in Turn 2,
-        and transitions directly to the next module.
+        Process one turn of Phase 4 Topic Discovery.
+
+        Discovers topic_titles module-by-module.
+        Exit gate: TOPIC_COVERAGE_VALIDATOR ensures every learning_outcome
+        is supported by at least one topic before advancing.
 
         Returns:
           {
@@ -1613,7 +1237,7 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
             "current_module_idx": int,
             "total_modules":      int,
             "discovered_topics":  list of str,
-            "coverage_map":       dict,
+            "coverage_map":       dict (populated after validator runs),
             "module_complete":    bool,
             "phase_complete":     bool
           }
@@ -1640,10 +1264,7 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
         scratchpad       = session.get("live_scratchpad", {})
         topic_mod_idx    = scratchpad.get("topic_discovery_module_idx", 0)
         discovered_topics: List[str] = scratchpad.get("topic_discovery_topics", [])
-        mapping_stage    = scratchpad.get("topic_mapping_stage", 0)
-        
-        topic_turn_count = scratchpad.get("topic_discovery_turn_count", 0) + 1
-        scratchpad["topic_discovery_turn_count"] = topic_turn_count
+        reflection_asked: bool       = scratchpad.get("topic_reflection_asked", False)
 
         # Safety: already past end
         if topic_mod_idx >= total_modules:
@@ -1666,189 +1287,241 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
         raw_transcript = session.get("raw_transcript", "").strip()
         raw_transcript += f"\n\n[EXPERT]: {expert_answer}"
         conv_history = self._build_conversation_history(raw_transcript, max_turns=6)
+        conv_context = self._build_conversation_history(raw_transcript, max_turns=2)
 
-        # ── 4.1. Update Conversation Memory (Sprint 3) ──
-        memory = scratchpad.get("conversation_memory", {})
-        memory = await self._run_conversation_memory(
-            conversation_history=conv_history,
-            expert_answer=expert_answer,
-            previous_memory=memory
-        )
-        scratchpad["conversation_memory"] = memory
-        self.supabase.table("interview_sessions").update({
-            "live_scratchpad": scratchpad
-        }).eq("id", session_id).execute()
+        # ── 4.5. Curriculum Classification (Phase 2.5) ──────────────────
+        classification = "OTHER"
+        confidence = 0.0
+        extracted_items = []
+        try:
+            class_res = await self.llm_fast.ainvoke(
+                CURRICULUM_CLASSIFICATION_PROMPT.format(
+                    expert_answer=expert_answer,
+                    transcript=raw_transcript
+                )
+            )
+            class_data = self._parse_json(class_res.content)
+            classification = str(class_data.get("classification", "OTHER")).upper()
+            confidence = float(class_data.get("confidence", 0.0))
+            extracted_items = class_data.get("extracted_items", [])
+        except Exception as e:
+            logger.warning(f"Phase 2.5 Curriculum Classification in Phase 4 failed: {e}")
 
-        def _parse_json(content: str) -> dict:
-            cl = content.strip()
-            if "```json" in cl:
-                cl = cl.split("```json")[1].split("```")[0].strip()
-            cl = re.sub(r',\s*([}\]])', r'\1', cl)
+        if extracted_items and confidence >= 0.85:
+            if classification == "PREREQUISITE":
+                steer_q = f"Those sound like foundational prerequisites. For the '{current_module_title}' module itself, what are the actual lessons or topics we should teach?"
+                raw_transcript += f"\n\n[AI JOURNALIST]: {steer_q}"
+                self.supabase.table("interview_sessions").update({
+                    "raw_transcript": raw_transcript
+                }).eq("id", session["id"]).execute()
+                return {
+                    "question":           steer_q,
+                    "current_module":     current_module_title,
+                    "current_module_idx": topic_mod_idx,
+                    "total_modules":      total_modules,
+                    "discovered_topics":  discovered_topics,
+                    "coverage_map":       {},
+                    "module_complete":    False,
+                    "phase_complete":     False
+                }
+            elif classification == "MODULE":
+                steer_q = f"Those feel like high-level course modules. For our current module, '{current_module_title}', what are the specific topics or lessons that belong inside it?"
+                raw_transcript += f"\n\n[AI JOURNALIST]: {steer_q}"
+                self.supabase.table("interview_sessions").update({
+                    "raw_transcript": raw_transcript
+                }).eq("id", session["id"]).execute()
+                return {
+                    "question":           steer_q,
+                    "current_module":     current_module_title,
+                    "current_module_idx": topic_mod_idx,
+                    "total_modules":      total_modules,
+                    "discovered_topics":  discovered_topics,
+                    "coverage_map":       {},
+                    "module_complete":    False,
+                    "phase_complete":     False
+                }
+            elif classification == "TOPIC":
+                # If they listed a group (>= 2 items), overwrite to prevent transcript duplication loops
+                if len(extracted_items) >= 2:
+                    discovered_topics = [t.strip() for t in extracted_items if t.strip()]
+                    logger.info(f"Phase 4.5: Overwrote topics list in scratchpad with {len(discovered_topics)} clean topics.")
+                else:
+                    # Append new items avoiding duplicates
+                    existing_lower = {t.lower() for t in discovered_topics}
+                    for t in extracted_items:
+                        if t.strip() and t.strip().lower() not in existing_lower:
+                            discovered_topics.append(t.strip())
+
+        # ── 5. Coverage Controller (Full Transcript Topic Extraction) ──
+        expert_signaled_complete = False
+        try:
+            cov_res = await self.llm_fast.ainvoke(
+                TOPIC_COVERAGE_CONTROLLER_PROMPT.format(
+                    current_module_title=current_module_title,
+                    transcript=raw_transcript
+                )
+            )
+            cov_data = self._parse_json(cov_res.content)
+            extracted_topics = cov_data.get("topics", [])
+            expert_signaled_complete = bool(cov_data.get("expert_signaled_complete", False))
+
+            # Merge deduplicated
+            existing_lower = {t.lower() for t in discovered_topics}
+            for t in extracted_topics:
+                if t.strip() and t.strip().lower() not in existing_lower:
+                    discovered_topics.append(t.strip())
+                    existing_lower.add(t.strip().lower())
+
+            # Transition Controller: only trigger validation if the expert explicitly signaled completion
+            # (or if we have asked the reflection/recovery question and they replied).
+            # Do NOT force validation automatically just because we have >= 3 topics.
+            pass
+        except Exception as e:
+            logger.warning(f"Phase 4 Coverage Controller failed: {e}")
+
+        # ── 6. COVERAGE VALIDATOR ──
+        should_validate = False
+        if expert_signaled_complete and discovered_topics:
+            should_validate = True
+        elif reflection_asked and discovered_topics:
+            should_validate = True
+            
+        if should_validate:
+            coverage_map      = {}
+            coverage_complete = False
+            recovery_question = None
             try:
-                return json.loads(cl)
-            except Exception:
-                return {}
-
-        # ── 5. Run Curriculum Mapping Flow ──
-        # Turn-limit safety override: if the expert gets stuck in this module for 3+ turns, force completion
-        if topic_turn_count >= 3:
-            logger.warning(f"Safety Gate: Turn limit reached inside module '{current_module_title}'. Forcing transition.")
-            mapping_stage = 1  # simulate final validation stage to force transition below
-
-        if mapping_stage == 0:
-            # Stage 0: Collect list from Expert
-            # Check classification first (prerequisite or other digression)
-            classification = "OTHER"
-            confidence = 0.0
-            extracted_items = []
-            try:
-                class_res = await self.llm_fast.ainvoke(
-                    CURRICULUM_CLASSIFICATION_PROMPT.format(
-                        expert_answer=expert_answer,
-                        transcript=raw_transcript
+                val_res = await self.llm.ainvoke(
+                    TOPIC_COVERAGE_VALIDATOR_PROMPT.format(
+                        current_module_title=current_module_title,
+                        learning_outcomes=json.dumps(learning_outcomes, indent=2),
+                        discovered_topics=json.dumps(
+                            [{"topic_title": t} for t in discovered_topics],
+                            indent=2
+                        )
                     )
                 )
-                class_data = _parse_json(class_res.content)
-                classification = str(class_data.get("classification", "OTHER")).upper()
-                confidence = float(class_data.get("confidence", 0.0))
-                extracted_items = class_data.get("extracted_items", [])
+                val_data         = self._parse_json(val_res.content)
+                coverage_complete = bool(val_data.get("coverage_complete", False))
+                coverage_map      = val_data.get("coverage_map", {})
+                recovery_question = val_data.get("recovery_question", "")
             except Exception as e:
-                logger.warning(f"Phase 4 Curriculum Classification failed: {e}")
+                logger.warning(f"Phase 4 coverage validator failed: {e}")
+                coverage_complete = True  # fail-safe
 
-            if extracted_items and confidence >= 0.85:
-                if classification == "PREREQUISITE":
-                    steer_q = f"Those sound like foundational prerequisites. For the '{current_module_title}' module itself, what are the actual lessons or topics we should teach?"
-                    raw_transcript += f"\n\n[AI JOURNALIST]: {steer_q}"
+            if coverage_complete:
+                # ── WRITE topics into this module's entry ─────────────────
+                topics_payload = [{"topic_title": t} for t in discovered_topics]
+                course_modules[topic_mod_idx]["topics"] = topics_payload
+
+                try:
+                    self.supabase.table("curriculum_blueprints").update({
+                        "course_modules": course_modules
+                    }).eq("expert_id", session["expert_id"]).execute()
+                    logger.info(f"Phase 4: {len(discovered_topics)} topics written for '{current_module_title}'")
+                except Exception as e:
+                    logger.error(f"Phase 4 blueprint persist failed: {e}")
+
+                # Advance to next module
+                next_idx      = topic_mod_idx + 1
+                phase_complete = (next_idx >= total_modules)
+
+                scratchpad["topic_discovery_module_idx"] = next_idx
+                scratchpad["topic_discovery_topics"]     = []   # reset for next module
+                scratchpad["topic_reflection_asked"]     = False
+
+                self.supabase.table("interview_sessions").update({
+                    "raw_transcript":  raw_transcript,
+                    "live_scratchpad": scratchpad
+                }).eq("id", session_id).execute()
+
+                if phase_complete:
+                    existing_synthesis = session.get("session_synthesis") or {}
+                    existing_synthesis["phase4_topic_discovery_complete"] = True
                     self.supabase.table("interview_sessions").update({
-                        "raw_transcript": raw_transcript
-                    }).eq("id", session["id"]).execute()
+                        "session_synthesis": existing_synthesis
+                    }).eq("id", session_id).execute()
+                    logger.info(f"Phase 4 fully complete for session {session_id}.")
                     return {
-                        "question":           steer_q,
+                        "question":           None,
                         "current_module":     current_module_title,
                         "current_module_idx": topic_mod_idx,
                         "total_modules":      total_modules,
                         "discovered_topics":  discovered_topics,
-                        "coverage_map":       {},
-                        "module_complete":    False,
-                        "phase_complete":     False
+                        "coverage_map":       coverage_map,
+                        "module_complete":    True,
+                        "phase_complete":     True
                     }
 
-            # Standard: Expert provided a list of topics. Extract them.
-            try:
-                cov_res = await self.llm_fast.ainvoke(
-                    TOPIC_COVERAGE_CONTROLLER_PROMPT.format(
-                        current_module_title=current_module_title,
-                        transcript=raw_transcript
-                    )
+                # Transition to next module
+                next_module_title = course_modules[next_idx].get("module_title", f"Module {next_idx + 1}")
+                transition_q = (
+                    f"Perfect. We've mapped out the lessons inside \"{current_module_title}\". "
+                    f"Let's move to \"{next_module_title}\". "
+                    f"How would you naturally break this module into its major lessons?"
                 )
-                cov_data = _parse_json(cov_res.content)
-                extracted_topics = cov_data.get("topics", [])
-                
-                # Deduplicate and save
-                existing_lower = {t.lower() for t in discovered_topics}
-                for t in extracted_topics:
-                    if t.strip() and t.strip().lower() not in existing_lower:
-                        discovered_topics.append(t.strip())
-            except Exception as e:
-                logger.warning(f"Phase 4 Stage 0 extraction failed: {e}")
+                raw_transcript += f"\n\n[AI JOURNALIST]: {transition_q}"
+                self.supabase.table("interview_sessions").update({
+                    "raw_transcript":  raw_transcript,
+                    "live_scratchpad": scratchpad
+                }).eq("id", session_id).execute()
 
-            # Advance to Stage 1 (Validation)
-            scratchpad["topic_mapping_stage"] = 1
-            scratchpad["topic_discovery_topics"] = discovered_topics
+                return {
+                    "question":           transition_q,
+                    "current_module":     next_module_title,
+                    "current_module_idx": next_idx,
+                    "total_modules":      total_modules,
+                    "discovered_topics":  [],
+                    "coverage_map":       coverage_map,
+                    "module_complete":    True,
+                    "phase_complete":     False
+                }
 
-            # Generate the validation question using the CI Layer (Director + Strategy)
-            next_question = f"Nice outline. Looking at these lessons, is there any critical topic we've missed before we move on?"
-            try:
-                # ── Step A0: Run Interview Producer (Sprint 4) ──
-                producer_move = await self._run_interview_producer(
-                    current_target=current_module_title,
-                    active_lens="N/A",
-                    conversation_history=conv_history,
-                    conversation_memory=memory
+            else:
+                # Coverage incomplete — ask recovery question
+                fallback_q = (
+                    f"Looking at what learners should be able to do after this module — "
+                    f"is there any important lesson we haven't included yet?"
                 )
+                rq = recovery_question or fallback_q
+                raw_transcript += f"\n\n[AI JOURNALIST]: {rq}"
+                scratchpad["topic_discovery_topics"]     = discovered_topics
+                scratchpad["topic_discovery_module_idx"] = topic_mod_idx
+                scratchpad["topic_reflection_asked"]     = True
+                self.supabase.table("interview_sessions").update({
+                    "raw_transcript":  raw_transcript,
+                    "live_scratchpad": scratchpad
+                }).eq("id", session_id).execute()
 
-                # ── Step A: Run Conversation Intelligence (Director + Strategy) ──
-                prev_move = scratchpad.get("previous_move", "")
-                ci = await self._run_conversation_intelligence(
-                    phase_name="Topic Discovery",
-                    current_target=current_module_title,
-                    missing_fields=["validation"],
-                    turn_number=topic_turn_count,
-                    conversation_history=conv_history,
-                    expert_answer=expert_answer,
-                    previous_move=prev_move,
-                    conversation_memory=memory,
-                )
-                if producer_move != "NONE":
-                    ci["move"] = producer_move
-                scratchpad["previous_move"] = ci["move"]
+                return {
+                    "question":           rq,
+                    "current_module":     current_module_title,
+                    "current_module_idx": topic_mod_idx,
+                    "total_modules":      total_modules,
+                    "discovered_topics":  discovered_topics,
+                    "coverage_map":       coverage_map,
+                    "module_complete":    False,
+                    "phase_complete":     False
+                }
 
-                # ── Step B: Run Question Generator with CI directives ──
-                prompt_content = f"""
-You are building the curriculum outline for the module '{current_module_title}'.
-The expert has proposed the following list of lessons:
-{json.dumps(discovered_topics, indent=2)}
-
-Generate a natural, thoughtful follow-up question to validate this list.
-Your goal is to check if anything important is missing or if the expert feels comfortable locking this outline and moving to the next module.
-
-CONVERSATION INTELLIGENCE DIRECTIVE:
-- Conversational Move: {ci['move']}
-- Strategy:            {ci['strategy']}
-- Conversation Angle:  {ci['conversation_angle']}
-- Style Note:          {ci['style_note']}
-- Energy Note:         {ci['energy_note']}
-- Avoid:               {json.dumps(ci['avoid'])}
-- Reflection Style:    {ci['reflection_style']}
-- Conversation Memory: {json.dumps(memory, indent=2)}
-
-IMPORTANT: Use the Strategy and Conversation Angle above to shape your validation question.
-Do NOT ask 'Is anything missing?' in a dry, robotic way. Ask it naturally through the chosen strategy.
-Reference earlier ideas, stories, or threads from the Conversation Memory where appropriate to connect your question back to their previous answers.
-
-BANNED OPENINGS (Do NOT use unless absolutely necessary):
-- "What do you think..."
-- "Can you explain..."
-- "What are the key factors..."
-- "How would you..."
-
-ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podcast):
-- "Something you just said caught my attention..."
-- "That reminds me of something I've heard from other engineers..."
-- "I'm curious about one part of that..."
-- "It sounds like there's a shift happening here..."
-- "You mentioned something interesting earlier..."
-- "Let's stay with that idea for a moment..."
-- "I'm wondering if that's where many engineers struggle..."
-"""
-                disc_res = await self.llm.ainvoke(prompt_content)
-                disc_data  = _parse_json(disc_res.content)
-                reflection = disc_data.get("reflection", "").strip()
-                question   = disc_data.get("question", "").strip() or disc_data.get("next_question", "").strip()
-                if not question:
-                    question = disc_res.content.strip()
-                if reflection and not question.startswith(reflection):
-                    next_question = f"{reflection} {question}"
-                else:
-                    next_question = question
-
-                # Run through Repetition Detector
-                next_question = await self._run_repetition_detector(
-                    proposed_question=next_question,
-                    raw_transcript=raw_transcript,
-                    information_need=f"validation of topics list inside module '{current_module_title}'",
-                )
-            except Exception as e:
-                logger.warning(f"Phase 4 Stage 1 validation question generation failed: {e}")
-
-            raw_transcript += f"\n\n[AI JOURNALIST]: {next_question}"
+        # ── 7. IN PROGRESS: Generate next topic discovery question ─────────
+        # If expert just signaled complete but reflection not yet asked → ask it
+        if expert_signaled_complete and not reflection_asked:
+            reflection_q = (
+                f"That's really helpful. Before we move on — looking at what "
+                f"learners need to achieve from \"{current_module_title}\", "
+                f"is there any lesson we've missed that would make the difference?"
+            )
+            raw_transcript += f"\n\n[AI JOURNALIST]: {reflection_q}"
+            scratchpad["topic_reflection_asked"]     = True
+            scratchpad["topic_discovery_topics"]     = discovered_topics
+            scratchpad["topic_discovery_module_idx"] = topic_mod_idx
             self.supabase.table("interview_sessions").update({
                 "raw_transcript":  raw_transcript,
                 "live_scratchpad": scratchpad
             }).eq("id", session_id).execute()
-
             return {
-                "question":           next_question,
+                "question":           reflection_q,
                 "current_module":     current_module_title,
                 "current_module_idx": topic_mod_idx,
                 "total_modules":      total_modules,
@@ -1858,95 +1531,84 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
                 "phase_complete":     False
             }
 
-        else:
-            # Stage 1: Validation Response. Extract final topics list, persist, and transition!
-            try:
-                cov_res = await self.llm_fast.ainvoke(
-                    TOPIC_COVERAGE_CONTROLLER_PROMPT.format(
-                        current_module_title=current_module_title,
-                        transcript=raw_transcript
-                    )
-                )
-                cov_data = _parse_json(cov_res.content)
-                extracted_topics = cov_data.get("topics", [])
-                
-                # Merge new topics
-                existing_lower = {t.lower() for t in discovered_topics}
-                for t in extracted_topics:
-                    if t.strip() and t.strip().lower() not in existing_lower:
-                        discovered_topics.append(t.strip())
-            except Exception as e:
-                logger.warning(f"Phase 4 Stage 1 final extraction failed: {e}")
+        # Standard: generate next conversational question
+        last_topic = discovered_topics[-1] if discovered_topics else ""
+        next_question = (
+            f"After {last_topic}, what other major lessons naturally belong inside "
+            f"\"{current_module_title}\"?" if last_topic
+            else f"If \"{current_module_title}\" were divided into its major lessons, what would naturally come first?"
+        )
+        try:
+            # Dynamic Reflection Style Rotation (Diversity Controller)
+            reflection_styles = [
+                "Insight reflection: Acknowledge the logical progression of these topics inside this module.",
+                "Contrast reflection: Contrast these practical topic areas with dry theoretical exercises.",
+                "Surprise reflection: Acknowledge a non-obvious, highly operational lesson they decided to include.",
+                "Connection reflection: Connect how these topics will enable the specific outcomes of this module."
+            ]
+            turn_count = len([l for l in raw_transcript.split("\n") if l.startswith("[EXPERT]:")])
+            selected_style = reflection_styles[turn_count % len(reflection_styles)]
 
-            # Persist to database
-            topics_payload = [{"topic_title": t} for t in discovered_topics]
-            course_modules[topic_mod_idx]["topics"] = topics_payload
-
-            try:
-                self.supabase.table("curriculum_blueprints").update({
-                    "course_modules": course_modules
-                }).eq("expert_id", session["expert_id"]).execute()
-                logger.info(f"Phase 4 Mapping: {len(discovered_topics)} topics written for '{current_module_title}'")
-            except Exception as e:
-                logger.error(f"Phase 4 blueprint persist failed: {e}")
-
-            # Transition to next module
-            next_idx = topic_mod_idx + 1
-            phase_complete = (next_idx >= total_modules)
-
-            # Reset scratchpad mapping variables for next module
-            scratchpad["topic_discovery_module_idx"] = next_idx
-            scratchpad["topic_discovery_topics"]     = []
-            scratchpad["topic_reflection_asked"]     = False
-            scratchpad["topic_discovery_turn_count"] = 0
-            scratchpad["topic_mapping_stage"]        = 0
-
-            if phase_complete:
-                existing_synthesis = session.get("session_synthesis") or {}
-                existing_synthesis["phase4_topic_discovery_complete"] = True
-                self.supabase.table("interview_sessions").update({
-                    "raw_transcript":  raw_transcript,
-                    "live_scratchpad": scratchpad,
-                    "session_synthesis": existing_synthesis
-                }).eq("id", session_id).execute()
-                logger.info(f"Phase 4 Mapping fully complete for session {session_id}.")
-                return {
-                    "question":           None,
-                    "current_module":     current_module_title,
-                    "current_module_idx": topic_mod_idx,
-                    "total_modules":      total_modules,
-                    "discovered_topics":  discovered_topics,
-                    "coverage_map":       {},
-                    "module_complete":    True,
-                    "phase_complete":     True
-                }
-
-            # Not done yet — generate transition question using Bridge Engine
-            next_module_title = course_modules[next_idx].get("module_title", f"Module {next_idx + 1}")
-            transition_q = await self._run_bridge_engine(
-                completed_target=current_module_title,
-                next_target=next_module_title,
-                transition_type="MODULE",
-                raw_transcript=raw_transcript,
-                modules_done=next_idx,
-                total_targets=total_modules,
+            prompt_content = TOPIC_DISCOVERY_ENGINE_PROMPT.format(
+                course_title=expert.get("course_title", "this course"),
+                current_module_idx=topic_mod_idx + 1,
+                total_modules=total_modules,
+                current_module_title=current_module_title,
+                learning_outcomes=json.dumps(learning_outcomes, indent=2),
+                discovered_topics=json.dumps(
+                    [{"topic_title": t} for t in discovered_topics],
+                    indent=2
+                ) if discovered_topics else "[]",
+                topic_count=len(discovered_topics),
+                conversation_history=conv_history,
+                expert_answer=expert_answer
             )
-            raw_transcript += f"\n\n[AI JOURNALIST]: {transition_q}"
-            
-            self.supabase.table("interview_sessions").update({
-                "raw_transcript":  raw_transcript,
-                "live_scratchpad": scratchpad
-            }).eq("id", session_id).execute()
 
-            return {
-                "question":           transition_q,
-                "current_module":     next_module_title,
-                "current_module_idx": next_idx,
-                "total_modules":      total_modules,
-                "discovered_topics":  [],
-                "coverage_map":       {},
-                "module_complete":    True,
-            }
+            # Suffix injection for transition & diversity controls
+            prompt_content += f"""
+
+TRANSITION & DIVERSITY CONTROLS:
+- Your target: Discover the next major lesson/topic inside the module '{current_module_title}'.
+- Use this reflection style: {selected_style}.
+- CRITICAL: Never start your reflection with generic template phrases (e.g. 'You've highlighted...', 'You've beautifully described...'). Make it sound like a natural, unique conversational bridge.
+"""
+            disc_res = await self.llm.ainvoke(prompt_content)
+            disc_data  = self._parse_json(disc_res.content)
+
+            # Pick up any additional topics the engine spotted
+            for t in disc_data.get("new_topics_detected", []):
+                if t.strip() and t.strip().lower() not in {x.lower() for x in discovered_topics}:
+                    discovered_topics.append(t.strip())
+
+            reflection = disc_data.get("reflection", "").strip()
+            question   = disc_data.get("question", "").strip()
+            if reflection and question:
+                next_question = f"{reflection} {question}"
+            elif question:
+                next_question = question
+        except Exception as e:
+            logger.warning(f"Phase 4 question generation failed: {e}")
+
+        raw_transcript += f"\n\n[AI JOURNALIST]: {next_question}"
+        scratchpad["topic_discovery_topics"]     = discovered_topics
+        scratchpad["topic_discovery_module_idx"] = topic_mod_idx
+        scratchpad["topic_reflection_asked"]     = reflection_asked
+
+        self.supabase.table("interview_sessions").update({
+            "raw_transcript":  raw_transcript,
+            "live_scratchpad": scratchpad
+        }).eq("id", session_id).execute()
+
+        return {
+            "question":           next_question,
+            "current_module":     current_module_title,
+            "current_module_idx": topic_mod_idx,
+            "total_modules":      total_modules,
+            "discovered_topics":  discovered_topics,
+            "coverage_map":       {},
+            "module_complete":    False,
+            "phase_complete":     False
+        }
 
     # =========================================================================
     # PHASE 5 — CURRICULUM VALIDATION & LOCK ENGINE
@@ -2122,13 +1784,38 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
         else:
             expert_answer = "(Transitioning to topic exploration)"
 
-        # ── 5. Run Lesson Initializer (Phase 1 Redesign) ──
-        init_data = await self._run_lesson_initializer(
-            module_title=current_module_title,
-            topic_title=current_topic_title
-        )
-        arc = init_data.get("arc", "UNDERSTANDING")
-        next_question = init_data.get("introduction", f"Let's spend some time on {current_topic_title}.")
+        def _parse_json(content: str) -> dict:
+            cl = content.strip()
+            if "```json" in cl:
+                cl = cl.split("```json")[1].split("```")[0].strip()
+            cl = re.sub(r',\s*([}\]])', r'\1', cl)
+            try:
+                return json.loads(cl)
+            except Exception:
+                return {}
+
+        conv_history = self._build_conversation_history(raw_transcript, max_turns=6)
+
+        # ── 5. Generate Opener Question ───────────────────────────────────
+        next_question = f"Let's dive into {current_topic_title} under {current_module_title}."
+        init_data = {}
+        try:
+            init_res = await self.llm.ainvoke(
+                TOPIC_INITIALIZATION_PROMPT.format(
+                    course_title=expert.get("course_title", ""),
+                    course_description=expert.get("course_description", ""),
+                    current_module_title=current_module_title,
+                    module_context=selected_module.get("module_context", ""),
+                    learning_outcomes=json.dumps(selected_module.get("learning_outcomes", []), indent=2),
+                    current_topic_title=current_topic_title,
+                    conversation_history=conv_history,
+                    expert_answer=expert_answer
+                )
+            )
+            init_data = _parse_json(init_res.content)
+            next_question = init_data.get("question", next_question)
+        except Exception as e:
+            logger.warning(f"Phase 6 question generation failed: {e}")
 
         # ── 6. Update Scratchpad + Transcript ──────────────────────────────
         raw_transcript += f"\n\n[AI JOURNALIST]: {next_question}"
@@ -2138,25 +1825,22 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
         scratchpad["current_module_idx"] = current_module_idx
         scratchpad["current_topic_idx"]  = current_topic_idx
         scratchpad["topic_status"]       = "IN_PROGRESS"
-
-        # Reset new state variables for Block 4 Redesign
-        scratchpad["lesson_arc"] = arc
-        scratchpad["lesson_coverage"] = {
-            "concept": 0,
-            "breakdown": 0,
-            "mistakes": 0,
-            "stories": 0,
-            "heuristics": 0,
-            "evaluation": 0
-        }
-        scratchpad["deep_dive_turn_count"] = 0
-        scratchpad["lesson_turn_count"] = 0
-        scratchpad["topic_lens"] = "understanding"
+        # Reset lens tracking for the new topic
+        scratchpad["topic_lens"]         = "understanding"
 
         self.supabase.table("interview_sessions").update({
             "raw_transcript":  raw_transcript,
             "live_scratchpad": scratchpad
         }).eq("id", session_id).execute()
+
+        return {
+            "question":           next_question,
+            "current_module":     current_module_title,
+            "current_topic":      current_topic_title,
+            "topic_ready":        True,
+            "next_engine":        "TOPIC_KNOWLEDGE_EXPLORATION",
+            "phase_complete":     False
+        }
 
         return {
             "question":           next_question,
@@ -2231,18 +1915,6 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
 
         conv_history = self._build_conversation_history(raw_transcript, max_turns=6)
 
-        # ── 2.1. Update Conversation Memory (Sprint 3) ──
-        memory = scratchpad.get("conversation_memory", {})
-        memory = await self._run_conversation_memory(
-            conversation_history=conv_history,
-            expert_answer=expert_answer,
-            previous_memory=memory
-        )
-        scratchpad["conversation_memory"] = memory
-        self.supabase.table("interview_sessions").update({
-            "live_scratchpad": scratchpad
-        }).eq("id", session_id).execute()
-
         # ── 3. PHASE 8: Check Knowledge Coverage (FAST) ────────────────────
         lens_complete = False
         coverage_data = {}
@@ -2279,244 +1951,153 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
             except Exception as e:
                 logger.warning(f"Phase 10 gap check failed: {e}")
 
-
-        # ── 3. Tacit Opportunity Detector & Insight Deep Dive (Phases 6 & 7) ──
-        deep_dive_active = scratchpad.get("deep_dive_active", False)
-
-        if not deep_dive_active and deep_dive_count < 2:
-            tacit_res = await self._run_tacit_opportunity_detector(
-                last_expert_answer=expert_answer,
-                conversation_history=conv_history
-            )
-            if tacit_res.get("opportunity_detected"):
-                deep_dive_active = True
-                scratchpad["deep_dive_active"] = True
-                scratchpad["deep_dive_question"] = tacit_res.get("deep_dive_question")
-                logger.info(f"Tacit Opportunity Detected: {tacit_res.get('goldmine_type')} -> Starting Deep Dive.")
-
-        if deep_dive_active and deep_dive_count < 2:
-            next_question = scratchpad.get("deep_dive_question", "Can you walk me through the details of that?")
-            
-            deep_dive_count += 1
-            scratchpad["deep_dive_turn_count"] = deep_dive_count
-            
-            if deep_dive_count >= 2:
-                scratchpad["deep_dive_active"] = False
-
-            # Run through Repetition Detector
-            next_question = await self._run_repetition_detector(
-                proposed_question=next_question,
-                raw_transcript=raw_transcript,
-                information_need=f"deep-dive on tacit details inside topic '{current_topic}'",
-            )
-
-            raw_transcript += f"\n\n[AI JOURNALIST]: {next_question}"
+        # ── 5. PROCESS OUTCOMES ───────────────────────────────────────────
+        
+        # Scenario A: Lens has a gap -> Ask gap question, stay on lens
+        if lens_complete and gap_detected and gap_question:
+            raw_transcript += f"\n\n[AI JOURNALIST]: {gap_question}"
             self.supabase.table("interview_sessions").update({
-                "raw_transcript":  raw_transcript,
-                "live_scratchpad": scratchpad
+                "raw_transcript": raw_transcript
             }).eq("id", session_id).execute()
 
             return {
-                "question":           next_question,
+                "question":           gap_question,
                 "current_module":     current_module,
                 "current_topic":      current_topic,
-                "current_lens":       "deep_dive",
+                "current_lens":       current_lens,
                 "lens_complete":      False,
                 "topic_complete":     False,
                 "phase_complete":     False
             }
 
-        # Reset deep dive flag if we fall out of it
-        scratchpad["deep_dive_active"] = False
+        # Scenario B: Lens is complete & no gaps -> Transition lens or topic
+        if lens_complete and not gap_detected:
+            current_lens_idx = LENS_SEQUENCE.index(current_lens)
+            
+            # Sub-Scenario B1: Move to next lens of the same topic
+            if current_lens_idx + 1 < len(LENS_SEQUENCE):
+                next_lens = LENS_SEQUENCE[current_lens_idx + 1]
+                scratchpad["topic_lens"] = next_lens
 
-        # ── 4. Lesson Coverage Calculation (Phase 3 Redesign) ──
-        segment_transcript = "\n".join(raw_transcript.split("\n")[-15:])
-        lesson_turn_count = scratchpad.get("lesson_turn_count", 0) + 1
-        scratchpad["lesson_turn_count"] = lesson_turn_count
-        
-        lesson_coverage = scratchpad.get("lesson_coverage", {})
-        coverage_data = await self._run_coverage_controller(
-            topic_title=current_topic,
-            transcript=segment_transcript
-        )
-        lesson_coverage = coverage_data.get("coverage", lesson_coverage)
-        scratchpad["lesson_coverage"] = lesson_coverage
-        missing_components = coverage_data.get("missing_components", [])
+                # Phase 11 transition prompt
+                transition_q = f"Let's move to the next lens: {next_lens}."
+                try:
+                    trans_res = await self.llm.ainvoke(
+                        TOPIC_TRANSITION_PROMPT.format(
+                            course_title=expert.get("course_title", ""),
+                            completed_module=current_module,
+                            completed_topic=current_topic,
+                            completed_stage=current_lens,
+                            next_module=current_module,
+                            next_topic=current_topic,
+                            next_stage=next_lens,
+                            conversation_history=self._build_conversation_history(raw_transcript, max_turns=4)
+                        )
+                    )
+                    trans_data = _parse_json(trans_res.content)
+                    reflection  = trans_data.get("reflection", "").strip()
+                    question    = trans_data.get("question", "").strip()
+                    if reflection and question:
+                        transition_q = f"{reflection} {question}"
+                    elif question:
+                        transition_q = question
+                except Exception as e:
+                    logger.warning(f"Phase 11 lens transition generation failed: {e}")
 
-        # ── 5. Lesson Completion Check & Silent Extraction (Phases 8 & 9) ──
-        lesson_complete = False
-        if lesson_turn_count >= 15:
-            lesson_complete = True
-            logger.info(f"Lesson '{current_topic}' completed via safety gate (turn limit reached).")
-        elif lesson_coverage.get("concept", 0) >= 70 and lesson_coverage.get("breakdown", 0) >= 70:
-            lesson_complete = True
-            logger.info(f"Lesson '{current_topic}' completed via Coverage satisfaction.")
-
-        if lesson_complete:
-            # Phase 8: Silent Background Extraction
-            extracted_schema = await self._run_knowledge_extraction_engine(
-                topic_title=current_topic,
-                transcript=segment_transcript
-            )
-
-            # Save to blueprint
-            cb_res = self.supabase.table("curriculum_blueprints").select("*").eq("expert_id", session["expert_id"]).execute()
-            course_modules = cb_res.data[0].get("course_modules", [])
-            found_topic = False
-            for module in course_modules:
-                for topic in module.get("topics", []):
-                    if topic.get("topic_title") == current_topic:
-                        topic["concept"] = extracted_schema.get("concept", "")
-                        topic["breakdown"] = extracted_schema.get("breakdown", "")
-                        topic["constraints"] = extracted_schema.get("constraints", "")
-                        topic["edge_cases"] = extracted_schema.get("edge_cases", "")
-                        topic["action_items"] = extracted_schema.get("action_items", [])
-                        topic["common_mistakes"] = extracted_schema.get("common_mistakes", [])
-                        topic["evaluation_path"] = extracted_schema.get("evaluation_path", "")
-                        topic["expert_heuristic"] = extracted_schema.get("expert_heuristic", "")
-                        topic["expert_story"] = extracted_schema.get("expert_story", "")
-                        found_topic = True
-                        break
-                if found_topic:
-                    break
-
-            try:
-                self.supabase.table("curriculum_blueprints").update({
-                    "course_modules": course_modules
-                }).eq("expert_id", session["expert_id"]).execute()
-                logger.info(f"Phase 6: Silent Extraction complete for '{current_topic}'.")
-            except Exception as e:
-                logger.error(f"Failed to persist final blueprint extraction: {e}")
-
-            # Transition check: find next incomplete topic
-            selected_module = None
-            selected_topic = None
-            next_m_idx = 0
-            next_t_idx = 0
-            for m_idx, module in enumerate(course_modules):
-                for t_idx, topic in enumerate(module.get("topics", [])):
-                    if not topic.get("concept"):
-                        selected_module = module
-                        selected_topic = topic
-                        next_m_idx = m_idx
-                        next_t_idx = t_idx
-                        break
-                if selected_topic:
-                    break
-
-            if not selected_topic:
-                # All lessons complete!
-                existing_synthesis = session.get("session_synthesis") or {}
-                existing_synthesis["phase6_exploration_complete"] = True
+                raw_transcript += f"\n\n[AI JOURNALIST]: {transition_q}"
                 self.supabase.table("interview_sessions").update({
                     "raw_transcript":  raw_transcript,
-                    "session_synthesis": existing_synthesis
+                    "live_scratchpad": scratchpad
                 }).eq("id", session_id).execute()
 
                 return {
-                    "question":           None,
+                    "question":           transition_q,
                     "current_module":     current_module,
                     "current_topic":      current_topic,
-                    "current_lens":       "None",
+                    "current_lens":       next_lens,
                     "lens_complete":      True,
-                    "topic_complete":     True,
-                    "phase_complete":     True
+                    "topic_complete":     False,
+                    "phase_complete":     False
                 }
 
-            # Next lesson exists — Phase 10 Transition bridge
-            next_topic_title = selected_topic.get("topic_title", "")
-            transition_q = await self._run_bridge_engine(
-                completed_target=current_topic,
-                next_target=next_topic_title,
-                transition_type="TOPIC",
-                raw_transcript=raw_transcript,
-                modules_done=next_m_idx,
-                total_targets=len(course_modules),
-            )
-            raw_transcript += f"\n\n[AI JOURNALIST]: {transition_q}"
+            # Sub-Scenario B2: All lenses complete -> Extract knowledge + complete topic!
+            else:
+                # Phase 9: Tacit Knowledge Extraction
+                extracted_knowledge = {}
+                try:
+                    ext_res = await self.llm.ainvoke(
+                        TACIT_KNOWLEDGE_EXTRACTION_PROMPT.format(
+                            current_topic_title=current_topic,
+                            transcript=raw_transcript
+                        )
+                    )
+                    extracted_knowledge = _parse_json(ext_res.content)
+                except Exception as e:
+                    logger.warning(f"Phase 9 knowledge extraction failed: {e}")
 
-            # Reset scratchpad variables for the next topic
-            scratchpad["current_module"]     = selected_module.get("module_title", "")
-            scratchpad["current_topic"]      = next_topic_title
-            scratchpad["current_module_idx"] = next_m_idx
-            scratchpad["current_topic_idx"]  = next_t_idx
-            scratchpad["topic_status"]       = "INITIALIZED"
-            scratchpad["topic_lens"]         = "understanding"
-            scratchpad["deep_dive_turn_count"] = 0
-            scratchpad["lesson_turn_count"] = 0
+                # Load current blueprint and write extracted knowledge to this topic in-place
+                cb_res = self.supabase.table("curriculum_blueprints").select("*").eq("expert_id", session["expert_id"]).execute()
+                if cb_res.data:
+                    blueprint = cb_res.data[0]
+                    course_modules = blueprint.get("course_modules", [])
+                    
+                    # Search and update in-place
+                    for module in course_modules:
+                        for topic in module.get("topics", []):
+                            if topic.get("topic_title", "").lower() == current_topic.lower():
+                                topic["concept"]          = extracted_knowledge.get("concept", "")
+                                topic["breakdown"]        = extracted_knowledge.get("breakdown", "")
+                                topic["constraints"]      = extracted_knowledge.get("constraints", "")
+                                topic["edge_cases"]       = extracted_knowledge.get("edge_cases", "")
+                                topic["action_items"]     = extracted_knowledge.get("action_items", [])
+                                topic["common_mistakes"]   = extracted_knowledge.get("common_mistakes", [])
+                                topic["evaluation_path"]   = extracted_knowledge.get("evaluation_path", "")
+                                topic["expert_heuristic"] = extracted_knowledge.get("expert_heuristic", "")
+                                topic["reference_guides"]  = extracted_knowledge.get("reference_guides", [])
+                                topic["expert_story"]     = extracted_knowledge.get("expert_story", "")
+                                break
 
-            self.supabase.table("interview_sessions").update({
-                "raw_transcript":  raw_transcript,
-                "live_scratchpad": scratchpad
-            }).eq("id", session_id).execute()
+                    # Persist blueprint
+                    try:
+                        self.supabase.table("curriculum_blueprints").update({
+                            "course_modules": course_modules
+                        }).eq("expert_id", session["expert_id"]).execute()
+                        logger.info(f"Phase 9: saved fully enriched topic '{current_topic}'")
+                    except Exception as e:
+                        logger.error(f"Failed to persist topic enrichment: {e}")
 
-            return {
-                "question":           transition_q,
-                "current_module":     current_module,
-                "current_topic":      next_topic_title,
-                "current_lens":       "transition",
-                "lens_complete":      True,
-                "topic_complete":     True,
-                "phase_complete":     False
-            }
+                # Clear topic status and initialize next topic
+                scratchpad["topic_status"] = "COMPLETE"
+                self.supabase.table("interview_sessions").update({
+                    "raw_transcript":  raw_transcript,
+                    "live_scratchpad": scratchpad
+                }).eq("id", session_id).execute()
 
-        # ── 6. Normal exploration: Director + strategy + Generator ──
+                # Trigger auto-initialization for the next topic
+                next_init = await self.topic_initialization_turn(session_id=session_id)
+                return {
+                    "question":           next_init["question"],
+                    "current_module":     next_init["current_module"],
+                    "current_topic":      next_init["current_topic"],
+                    "current_lens":       "understanding",
+                    "lens_complete":      True,
+                    "topic_complete":     True,
+                    "phase_complete":     next_init["phase_complete"]
+                }
+
+        # Scenario C: Lens not complete -> generate standard follow-up question
+        next_question = f"Can you expand on the {current_lens} side of {current_topic}?"
         try:
-            # Step A: Run Conversation Intelligence (Director + Strategy)
-            lesson_arc = scratchpad.get("lesson_arc", "understanding")
-            ci = await self._run_conversation_intelligence(
-                phase_name="Topic Knowledge Exploration",
-                current_target=current_topic,
-                missing_fields=missing_components,
-                turn_number=lesson_turn_count,
-                conversation_history=conv_history,
-                expert_answer=expert_answer,
-                active_lens=lesson_arc,
-                conversation_memory=memory,
+            exp_res = await self.llm.ainvoke(
+                EXPERT_UNDERSTANDING_PROMPT.format(
+                    course_title=expert.get("course_title", ""),
+                    current_module_title=current_module,
+                    current_topic_title=current_topic,
+                    current_lens=current_lens,
+                    conversation_history=conv_history,
+                    expert_answer=expert_answer
+                )
             )
-
-            # Step B: Run Question Generator
-            prompt_content = f"""
-You are conducting a peer-to-peer technical interview with an expert about the lesson '{current_topic}' under the module '{current_module}'.
-
-CONVERSATION ARC: {lesson_arc}
-CURRENT COVERAGE RATINGS (0-100%):
-{json.dumps(lesson_coverage, indent=2)}
-
-Your goal is to explore how the expert thinks about this lesson.
-We need to gather details on the missing components: {json.dumps(missing_components)}.
-
-CONVERSATION INTELLIGENCE DIRECTIVE:
-- Conversational Objective: {ci.get('move')}
-- Strategy:               {ci.get('strategy')}
-- Conversation Angle:     {ci.get('conversation_angle')}
-- Style Note:             {ci.get('style_note')}
-- Energy Note:            {ci.get('energy_note')}
-- Avoid:                  {json.dumps(ci.get('avoid'))}
-- Reflection Style:       {ci.get('reflection_style')}
-- Conversation Memory:    {json.dumps(memory, indent=2)}
-
-IMPORTANT: Use the Strategy and Conversation Angle above to shape your next question.
-Do NOT ask for missing components by name (never say 'What are the common mistakes?' or 'Explain your heuristics').
-Instead, ask it naturally as a podcast host peer. E.g., if you need 'common mistakes', adopt a 'Student Perspective' style and ask what catches beginners off guard.
-Reference earlier ideas, stories, or threads from the Conversation Memory where appropriate to connect your question back to their previous answers.
-
-BANNED OPENINGS (Do NOT use unless absolutely necessary):
-- "What do you think..."
-- "Can you explain..."
-- "What are the key factors..."
-- "How would you..."
-
-ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podcast):
-- "Something you just said caught my attention..."
-- "That reminds me of something I've heard from other engineers..."
-- "I'm curious about one part of that..."
-- "It sounds like there's a shift happening here..."
-- "You mentioned something interesting earlier..."
-- "Let's stay with that idea for a moment..."
-- "I'm wondering if that's where many engineers struggle..."
-"""
-            exp_res = await self.llm.ainvoke(prompt_content)
             exp_data = _parse_json(exp_res.content)
             reflection = str(exp_data.get("reflection", "")).strip()
             question   = str(exp_data.get("next_question") or exp_data.get("question") or "").strip()
@@ -2526,13 +2107,6 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
                 next_question = question
             elif reflection:
                 next_question = reflection
-
-            # ── Step C: Repetition Detector (final gate) ──
-            next_question = await self._run_repetition_detector(
-                proposed_question=next_question,
-                raw_transcript=raw_transcript,
-                information_need=f"{current_lens} components of topic '{current_topic}'",
-            )
         except Exception as e:
             logger.warning(f"Phase 7 Expert Understanding Engine failed: {e}")
 
@@ -3446,7 +3020,7 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
 
     def _compute_server_tangent_count(self, transcript: str, client_count: int = 0) -> int:
         """
-        FIX 1.3 - Count consecutive AI follow-ups since the last [SCRIPT] boundary.
+        FIX 1.3 — Count consecutive AI follow-ups since the last [SCRIPT] boundary.
 
         BUG FIXED: the previous version broke on [EXPERT]: lines, which appear
         between every AI question. This reset the counter to 1 on every turn.
@@ -3479,7 +3053,7 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
 
     def _validate_and_persist_block(self, session: dict, session_id: str, requested_block: str) -> str:
         """
-        FIX 2.3 - Validates block transitions and persists current_block server-side.
+        FIX 2.3 — Validates block transitions and persists current_block server-side.
         Prevents the frontend from skipping blocks or sending invalid block strings.
         Allows same block or one step forward only.
         """
@@ -3541,7 +3115,7 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
 
     def _compute_phase_objectives(self, active_block: str, transcript: str, current_scratchpad: dict = None) -> Tuple[str, List[str]]:
         """
-        FIX 2.2 - Computes a structured objective map for the current block.
+        FIX 2.2 — Computes a structured objective map for the current block.
 
         Returns:
             Tuple of (formatted_string_for_prompt, list_of_missing_objective_labels)
@@ -3550,7 +3124,7 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
         and scans ONLY expert speech to prevent false positives from AI questions.
         """
 
-        # ── Per-block objectives - hybrid signals (2-3 word, natural speech) ──
+        # ── Per-block objectives — hybrid signals (2-3 word, natural speech) ──
         # IMPORTANT: These must match how experts ACTUALLY speak, not formal phrases.
         # Each objective gets 8+ variants to prevent false-negative (objective never completing).
         BLOCK_OBJECTIVES: Dict[str, List[Dict]] = {
@@ -3823,11 +3397,11 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
 
     async def background_update_scratchpad(self, session_id: str):
         """
-        DEPRECATED - scratchpad is now updated synchronously inside live_turn()
+        DEPRECATED — scratchpad is now updated synchronously inside live_turn()
         using llm_fast before the prompt is built. This method is kept as a
         no-op so any lingering background_tasks.add_task() calls don't crash.
         """
-        logger.debug(f"background_update_scratchpad called for {session_id} - no-op (now sync)")
+        logger.debug(f"background_update_scratchpad called for {session_id} — no-op (now sync)")
 
     async def synthesize(self, session_id: str) -> Dict[str, Any]:
         session_res = self.supabase.table("interview_sessions").select("*").eq("id", session_id).execute()
@@ -4085,27 +3659,28 @@ ENCOURAGED OPENINGS (Use these to make it sound like a natural, thoughtful podca
         
         # Fetch latest homework
         hw_res = self.supabase.table("homework_ledger").select("*").eq("expert_id", expert_id).order("created_at", desc=True).limit(1).execute()
-        hw = hw_res.data[0] if hw_res.data else {}
-        
+         hw= hw_res.data[0] if hw_res.data else{}
+            
+      
         previous_day = hw.get("iteration_number", 1)
         current_day = previous_day + 1
 
         block_2_first_q = "Let's dive into our second block: how do your core architectural decisions hold up under extreme production load?"
-        try:
-            sess_res = self.supabase.table("interview_sessions").select("script").eq("expert_id", expert_id).order("iteration_number", desc=True).limit(2).execute()
-            if sess_res.data:
-                for s in sess_res.data:
-                    if s.get("script"):
-                        arc = s["script"].get("interview_arc") or s["script"]
-                        if isinstance(arc, dict):
-                            sorted_blocks = sorted(arc.items(), key=lambda x: int(re.search(r'\d+', x[0]).group(0)) if re.search(r'\d+', x[0]) else 99)
-                            if len(sorted_blocks) > 1:
-                                b2_data = sorted_blocks[1][1]
-                                if isinstance(b2_data, dict) and b2_data.get("questions") and len(b2_data["questions"]) > 0:
-                                    block_2_first_q = b2_data["questions"][0].get("question_text", block_2_first_q)
-                                    break
-        except Exception as e:
-            logger.warning(f"Could not extract block 2 first question: {e}")
+try:
+sess_res = self.supabase.table("interview_sessions").select("script").eq("expert_id", expert_id).order("iteration_number", desc=True).limit(2).execute()
+if sess_res.data:
+for s in sess_res.data:
+if s.get("script"):
+arc = s["script"].get("interview_arc") or s["script"]
+if isinstance(arc, dict):
+sorted_blocks = sorted(arc.items(), key=lambda x: int(re.search(r'\d+', x[0]).group(0)) if re.search(r'\d+', x[0]) else 99)
+if len(sorted_blocks) > 1:
+b2_data = sorted_blocks[1][1]
+if isinstance(b2_data, dict) and b2_data.get("questions") and len(b2_data["questions"]) > 0:
+block_2_first_q = b2_data["questions"][0].get("question_text", block_2_first_q)
+break
+except Exception as e:
+logger.warning(f"Could not extract block 2 first question: {e}")
         
         res = self.llm.invoke(FLYWHEEL_BRIDGE_PROMPT.format(
             expert_name=expert.get('name', ''),

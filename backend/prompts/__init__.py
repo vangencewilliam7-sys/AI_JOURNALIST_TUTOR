@@ -36,12 +36,6 @@
 #   tacit_knowledge_extraction_engine.py │ TACIT_KNOWLEDGE_EXTRACTION_PROMPT
 #   knowledge_gap_manager.py       │  KNOWLEDGE_GAP_MANAGER_PROMPT
 #   topic_transition_engine.py     │  TOPIC_TRANSITION_PROMPT
-#   conversation_intelligence/      │  Conversation Intelligence Layer (Sprint 1 & 2)
-#     director.py                  │    CONVERSATION_DIRECTOR_PROMPT
-#     strategy_engine.py           │    STRATEGY_ENGINE_PROMPT
-#     repetition_detector.py       │    REPETITION_DETECTOR_PROMPT
-#     bridge_engine.py             │    BRIDGE_ENGINE_PROMPT
-#     reflection_engine.py         │    REFLECTION_ENGINE_PROMPT + REFLECTION_STYLE_ROTATION
 # ─────────────────────────────────────────────────────────────────────────
 #
 # PROMPT ROUTING BY PHASE:
