@@ -110,6 +110,8 @@ const parseScriptToThemes = (script: any): any[] => {
   return extractedThemes;
 };
 
+let hasLoadedRestoredState = false;
+
 const InterviewPage: React.FC = () => {
   const navigate = useNavigate();
   const { session } = useAuth();
@@ -121,6 +123,7 @@ const InterviewPage: React.FC = () => {
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [nextSessionId, setNextSessionId] = useState<string | null>(null);
   const [isChapterComplete, setIsChapterComplete] = useState(false);
+  const [hasPendingHomework, setHasPendingHomework] = useState(false);
   const [showDecision, setShowDecision] = useState<string | null>(null);
   const [sessionMeta, setSessionMeta] = useState({ iteration: 1, id: 'SESS-DAY-1' });
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -155,24 +158,32 @@ const InterviewPage: React.FC = () => {
     const reentryStatement = localStorage.getItem('reentry_statement');
 
     if (restoredTranscript && reentryStatement) {
-      setMessages(parseTranscriptToMessages(restoredTranscript, reentryStatement));
-      localStorage.removeItem('restored_transcript');
-      localStorage.removeItem('reentry_statement');
+      if (!hasLoadedRestoredState) {
+        setMessages(parseTranscriptToMessages(restoredTranscript, reentryStatement));
+        hasLoadedRestoredState = true;
+        setTimeout(() => {
+          localStorage.removeItem('restored_transcript');
+          localStorage.removeItem('reentry_statement');
+          localStorage.removeItem('restored_snapshot');
+        }, 1000);
+      }
     } else {
-      // Seed the conversation with a generic opening temporarily, it will be overwritten if DB has history
-      setMessages([
-        {
-          id: '1',
-          role: 'ai',
-          text: icebreakerData.opening_icebreaker || "Welcome to the studio. We're excited to dive into your background and extract the unwritten rules of your domain.",
-          timestamp: Date.now() - 600000,
-          decision: {
-            intent_classification: 'opening_question',
-            internal_reasoning: 'Day 1 opening icebreaker from the generated script.',
-            action: 'script_question'
+      if (!hasLoadedRestoredState) {
+        // Seed the conversation with a generic opening temporarily, it will be overwritten if DB has history
+        setMessages([
+          {
+            id: '1',
+            role: 'ai',
+            text: icebreakerData.opening_icebreaker || "Welcome to the studio. We're excited to dive into your background and extract the unwritten rules of your domain.",
+            timestamp: Date.now() - 600000,
+            decision: {
+              intent_classification: 'opening_question',
+              internal_reasoning: 'Day 1 opening icebreaker from the generated script.',
+              action: 'script_question'
+            }
           }
-        }
-      ]);
+        ]);
+      }
     }
 
     hasSeededRef.current = true;
@@ -202,7 +213,8 @@ const InterviewPage: React.FC = () => {
           const dbSnapshot = data.session.snapshot;
 
           // If we didn't just resume (restoredTranscript is null) but the DB actually has a chat history, load it!
-          if (!restoredTranscript && dbTranscript && dbTranscript.includes('[EXPERT]:')) {
+          const isResuming = restoredTranscript || hasLoadedRestoredState;
+          if (!isResuming && dbTranscript && dbTranscript.includes('[EXPERT]:')) {
             setMessages(parseTranscriptToMessages(dbTranscript));
           }
 
@@ -213,7 +225,6 @@ const InterviewPage: React.FC = () => {
             try {
               finalSnapshot = JSON.parse(restoredSnapshotStr);
             } catch (e) { console.error("Error parsing snapshot", e); }
-            localStorage.removeItem('restored_snapshot');
           }
 
           if (finalSnapshot && finalSnapshot.active_block) {
@@ -224,8 +235,21 @@ const InterviewPage: React.FC = () => {
               if (qIdx >= 0) setActiveQuestionIdx(qIdx);
             }
             setTangentCount(finalSnapshot.tangent_count || 0);
+          } else if (data.session.current_block) {
+            const targetStr = data.session.current_block.toLowerCase();
+            const bIdx = extractedThemes.findIndex(t => t.theme_title.toLowerCase().includes(targetStr) || targetStr.includes(t.theme_title.toLowerCase()));
+            if (bIdx >= 0) {
+              setActiveBlockIdx(bIdx);
+            } else if (data.session.iteration_number > 1 && extractedThemes.length > 1) {
+              setActiveBlockIdx(1);
+            } else {
+              setActiveBlockIdx(0);
+            }
+            setActiveQuestionIdx(0);
+          } else if (data.session.iteration_number > 1 && extractedThemes.length > 1) {
+            setActiveBlockIdx(1);
+            setActiveQuestionIdx(0);
           } else {
-            // Reset pointer to 0,0 whenever a new script loads and no snapshot exists
             setActiveBlockIdx(0);
             setActiveQuestionIdx(0);
           }
@@ -233,7 +257,9 @@ const InterviewPage: React.FC = () => {
       })
       .catch(err => console.error("Failed to fetch session script", err));
 
-    hasSeededRef.current = true;
+    return () => {
+      hasLoadedRestoredState = false;
+    };
   }, [sessionId, navigate]);
 
   useEffect(() => {
@@ -254,15 +280,7 @@ const InterviewPage: React.FC = () => {
       return { blockIdx: activeBlockIdx, qIdx: nextQIdx };
     }
 
-    // Current block exhausted — try the next block
-    const nextBlockIdx = activeBlockIdx + 1;
-    if (nextBlockIdx < scriptThemes.length) {
-      setActiveBlockIdx(nextBlockIdx);
-      setActiveQuestionIdx(0);
-      return { blockIdx: nextBlockIdx, qIdx: 0 };
-    }
-
-    // All blocks exhausted — fire end-session automatically (skip confirm, system-triggered)
+    // Current block exhausted — pause session and show homework transition screen!
     handleEndInterview(true);
     return null;
   }, [activeBlockIdx, activeQuestionIdx, scriptThemes]);
@@ -323,7 +341,25 @@ const InterviewPage: React.FC = () => {
               scriptThemes[next.blockIdx]?.questions?.[next.qIdx]?.question_text
               ?? "Great — let's keep going.";
           } else {
-            displayText = "That wraps up all our topics — ending the session now.";
+            displayText = "That is a brilliant insight to conclude this chapter on. Let me pause here to synthesize our notes and prepare the next part!";
+            setTimeout(() => {
+              setIsSynthesizing(true);
+              fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } })
+                .then(r => r.json())
+                .then(resData => {
+                  setIsSynthesizing(false);
+                  if (resData.next_session_id) {
+                    setNextSessionId(resData.next_session_id);
+                    localStorage.setItem('session_id', resData.next_session_id);
+                  }
+                  setHasPendingHomework(Boolean(resData.has_pending_homework));
+                  setIsChapterComplete(true);
+                })
+                .catch(e => {
+                  console.error(e);
+                  setIsSynthesizing(false);
+                });
+            }, 3000);
           }
           break;
         }
@@ -343,20 +379,24 @@ const InterviewPage: React.FC = () => {
 
         case 'system_auto_pause': {
           displayText = data.question ?? "That is a brilliant insight to conclude this chapter on. Let me pause here to synthesize our notes and prepare the next part!";
-          setIsSynthesizing(true);
-          fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } })
-            .then(r => r.json())
-            .then(resData => {
-              setIsSynthesizing(false);
-              if (resData.next_session_id) {
-                setNextSessionId(resData.next_session_id);
-              }
-              setIsChapterComplete(true);
-            })
-            .catch(e => {
-              console.error(e);
-              setIsSynthesizing(false);
-            });
+          setTimeout(() => {
+            setIsSynthesizing(true);
+            fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } })
+              .then(r => r.json())
+              .then(resData => {
+                setIsSynthesizing(false);
+                if (resData.next_session_id) {
+                  setNextSessionId(resData.next_session_id);
+                  localStorage.setItem('session_id', resData.next_session_id);
+                }
+                setHasPendingHomework(Boolean(resData.has_pending_homework));
+                setIsChapterComplete(true);
+              })
+              .catch(e => {
+                console.error(e);
+                setIsSynthesizing(false);
+              });
+          }, 3000);
           break;
         }
 
@@ -399,9 +439,11 @@ const InterviewPage: React.FC = () => {
       const res = await fetch(`http://localhost:9120/end-session/${sessionId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` } });
       const resData = await res.json();
       if (resData.next_session_id) {
-        localStorage.setItem('session_id', resData.next_session_id);
+        setNextSessionId(resData.next_session_id);
       }
-      navigate(`/verify-insights/${sessionId}`);
+      setHasPendingHomework(Boolean(resData.has_pending_homework));
+      setIsSynthesizing(false);
+      setIsChapterComplete(true);
     } catch (err) {
       console.error(err);
       alert("Failed to synthesize session.");
@@ -492,18 +534,28 @@ const InterviewPage: React.FC = () => {
 
   // ─── Chapter Complete screen (Part 2 transition) ──────────────────────────
   if (isChapterComplete) {
+    const isLocked = localStorage.getItem('hw_reviewed_' + (sessionId || '')) !== 'true' && localStorage.getItem('hw_reviewed_' + (nextSessionId || '')) !== 'true' && localStorage.getItem('hw_reviewed_global') !== 'true';
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg)', color: 'var(--text)' }}>
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--accent)', borderRadius: '16px', padding: '40px', maxWidth: '500px', textAlign: 'center', boxShadow: '0 20px 25px -5px rgba(124,106,255,0.15)' }}>
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--accent)', borderRadius: '16px', padding: '40px', maxWidth: '520px', textAlign: 'center', boxShadow: '0 20px 25px -5px rgba(124,106,255,0.15)' }}>
           <div style={{ fontSize: '48px', marginBottom: '16px' }}>✨</div>
-          <h2 style={{ fontSize: '24px', marginBottom: '12px' }}>Chapter Fully Synthesized</h2>
-          <p style={{ color: 'var(--text-dim)', lineHeight: '1.6', marginBottom: '28px' }}>
-            The AI Journalist has processed your tacit insights, generated homework verification loops, and prepared memory vectors for Chapter Part 2.
+          <h2 style={{ fontSize: '24px', marginBottom: '12px' }}>Block Complete & Synthesized</h2>
+          <p style={{ color: 'var(--text-dim)', lineHeight: '1.6', marginBottom: '20px' }}>
+            The AI Journalist has processed this block's tacit insights, generated block-isolated homework verification loops, and prepared the clean handoff into the next block.
           </p>
+
+          {isLocked && (
+            <div style={{ background: 'rgba(245, 158, 11, 0.1)', border: '1px solid #f59e0b', borderRadius: '10px', padding: '14px', marginBottom: '20px', fontSize: '13px', color: '#f59e0b', textAlign: 'left' }}>
+              <strong>🔒 Progression Locked:</strong> You must click <strong>Review Homework Ledger First</strong> below to review the homework and provide supporting resources before continuing to Block 2.
+            </div>
+          )}
+
           <button
             className="send-btn"
-            style={{ width: '100%', padding: '14px', fontSize: '16px', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+            disabled={isLocked}
+            style={{ width: '100%', padding: '14px', fontSize: '15px', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', opacity: isLocked ? 0.45 : 1, cursor: isLocked ? 'not-allowed' : 'pointer' }}
             onClick={() => {
+              if (isLocked) return;
               if (nextSessionId) {
                 localStorage.setItem('session_id', nextSessionId);
               }
@@ -511,7 +563,18 @@ const InterviewPage: React.FC = () => {
               window.location.reload();
             }}
           >
-            Continue to Session Part 2 <ArrowRight size={18} />
+            {isLocked ? '🔒 Review Homework First to Continue' : 'Continue to Next Block / Session'} {!isLocked && <ArrowRight size={18} />}
+          </button>
+          <button
+            style={{ width: '100%', marginTop: '12px', padding: '14px', fontSize: '14px', fontWeight: 700, background: isLocked ? 'var(--accent)' : 'transparent', border: `1px solid ${isLocked ? 'var(--accent)' : 'var(--border)'}`, color: isLocked ? '#fff' : 'var(--text-dim)', borderRadius: '8px', cursor: 'pointer', boxShadow: isLocked ? '0 4px 14px rgba(124, 106, 255, 0.35)' : 'none' }}
+            onClick={() => {
+              if (nextSessionId) {
+                localStorage.setItem('session_id', nextSessionId);
+              }
+              navigate('/homework');
+            }}
+          >
+            📎 Review Homework Ledger First {isLocked && ' (Action Required)'}
           </button>
         </div>
       </div>
@@ -524,7 +587,7 @@ const InterviewPage: React.FC = () => {
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg)', color: 'var(--text)' }}>
         <Loader2 size={48} className="spin" style={{ color: 'var(--accent)', marginBottom: '20px' }} />
         <h2>Synthesizing Knowledge...</h2>
-        <p style={{ color: 'var(--text-dim)' }}>Extracting tacit knowledge from session SESS-DEMO-DAY1 for Demo Expert.</p>
+        <p style={{ color: 'var(--text-dim)' }}>Extracting tacit knowledge and building vector memory for Chapter Part 2.</p>
       </div>
     );
   }

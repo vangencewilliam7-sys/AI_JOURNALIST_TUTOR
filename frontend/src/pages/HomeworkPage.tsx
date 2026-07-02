@@ -92,9 +92,16 @@ const HomeworkPage: React.FC = () => {
       try {
         const res = await fetch(`${API_BASE_URL}/homework`, { headers: { 'Authorization': `Bearer ${session?.access_token}` } });
         const data = await res.json();
+        const currSessId = localStorage.getItem('session_id') || '';
+        if (currSessId) {
+          localStorage.setItem('hw_reviewed_' + currSessId, 'true');
+        }
         if (data.status === 'success' && data.homework) {
           setHomeworkId(data.homework.id);
           setHomework(data.homework.ai_open_loops || []);
+          if (data.homework.session_id) {
+            localStorage.setItem('hw_reviewed_' + data.homework.session_id, 'true');
+          }
           if (data.homework.human_manual_notes) {
             setManualNotes(data.homework.human_manual_notes);
           }
@@ -209,7 +216,11 @@ const HomeworkPage: React.FC = () => {
           </div>
 
           {homework.length === 0 && (
-            <p style={{ color: 'var(--text-dim)' }}>No open loops found for this expert yet. Complete a Day 1 session first.</p>
+            <div style={{ background: 'var(--bg-card)', border: '1px solid #10b981', borderRadius: '12px', padding: '24px', textAlign: 'center', color: '#10b981', marginBottom: '16px' }}>
+              <div style={{ fontSize: '24px', marginBottom: '8px' }}>🎉</div>
+              <strong style={{ fontSize: '16px', display: 'block', marginBottom: '4px' }}>No Homework Found in This Block</strong>
+              <span style={{ fontSize: '14px', color: 'var(--text-dim)' }}>No verification tasks or unverified learning resources were detected in this block's responses. You are clear to proceed to the next block!</span>
+            </div>
           )}
 
           {homework.map((item, idx) => (
@@ -225,6 +236,13 @@ const HomeworkPage: React.FC = () => {
                       <span style={{ background: 'rgba(239,68,68,0.1)', color: '#ef4444', fontSize: '10px', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold', textTransform: 'uppercase' }}>{item.priority}</span>
                     )}
                   </div>
+
+                  {item.expert_quote_trigger && (
+                    <div style={{ marginBottom: '12px', padding: '10px 14px', borderRadius: '8px', background: 'rgba(168, 85, 247, 0.08)', borderLeft: '3px solid #a855f7', fontStyle: 'italic', fontSize: '13px', color: 'var(--text)' }}>
+                      <strong style={{ fontStyle: 'normal', display: 'block', marginBottom: '4px', color: '#a855f7' }}>📍 Found in Your Response Quote:</strong>
+                      "{item.expert_quote_trigger}"
+                    </div>
+                  )}
 
                   {item.resource_mentioned && (
                     <div style={{ marginBottom: '12px', fontSize: '14px' }}>
@@ -287,14 +305,27 @@ const HomeworkPage: React.FC = () => {
             <p style={{ color: 'var(--text-dim)', margin: '0 auto 24px auto', maxWidth: '500px', fontSize: '14px', lineHeight: '1.5' }}>
               The Flywheel Bridge will combine the AI's open loops with your manual research notes to generate a trust-signal opening script for Day 2.
             </p>
-            <button 
-              onClick={handleFlywheel}
-              disabled={!homeworkId}
-              style={{ background: homeworkId ? 'var(--accent)' : 'var(--border)', color: 'white', border: 'none', padding: '14px 28px', borderRadius: '8px', fontSize: '14px', fontWeight: 'bold', cursor: homeworkId ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
-            >
-              <RefreshCw size={18} />
-              Trigger Flywheel Bridge
-            </button>
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button 
+                onClick={handleFlywheel}
+                disabled={!homeworkId}
+                style={{ background: homeworkId ? 'var(--accent)' : 'var(--border)', color: 'white', border: 'none', padding: '14px 28px', borderRadius: '8px', fontSize: '14px', fontWeight: 'bold', cursor: homeworkId ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+              >
+                <RefreshCw size={18} />
+                Trigger Flywheel Bridge
+              </button>
+              <button 
+                onClick={async () => {
+                  if (generationPhase === 'idle') {
+                    await handleFlywheel();
+                  }
+                  navigate('/interview');
+                }}
+                style={{ background: 'transparent', color: 'var(--accent)', border: '1px solid var(--accent)', padding: '14px 28px', borderRadius: '8px', fontSize: '14px', fontWeight: 'bold', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+              >
+                Return to Interview Studio / Block 2 →
+              </button>
+            </div>
           </div>
         )}
 
@@ -371,7 +402,7 @@ const HomeworkPage: React.FC = () => {
               <div style={{ marginTop: '20px', textAlign: 'center' }}>
                 <button 
                   className="btn-go-live" 
-                  onClick={() => navigate('/script')}
+                  onClick={() => navigate('/interview')}
                   style={{ display: 'inline-flex' }}
                 >
                   Launch Day 2 Session →

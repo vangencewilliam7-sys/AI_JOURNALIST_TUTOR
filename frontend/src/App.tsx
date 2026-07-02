@@ -30,6 +30,8 @@ const App: React.FC = () => {
           <Route path="/report" element={<ProtectedRoute><ReportPage /></ProtectedRoute>} />
           <Route path="/homework" element={<ProtectedRoute><HomeworkPage /></ProtectedRoute>} />
           <Route path="/knowledge" element={<ProtectedRoute><KnowledgeOutputPage /></ProtectedRoute>} />
+          <Route path="/verify-insights/:sessionId" element={<Navigate to="/homework" replace />} />
+          <Route path="*" element={<Navigate to="/landing" replace />} />
         </Routes>
       </Router>
     </AuthProvider>

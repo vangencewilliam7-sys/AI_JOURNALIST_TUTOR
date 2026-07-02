@@ -664,22 +664,85 @@ async def end_session_endpoint(session_id: str, current_expert_id: str = Depends
         }).execute()
         source_id = source_res.data[0]["id"]
 
+        prior_block = prior_session.get("current_block") or "Block 1"
+        next_block_num = next_iter
+        next_block_str = f"Block {next_block_num}"
+
+        # Get flat list of themes from script to locate the next block and its opener question
+        prior_script = prior_session.get("script") or {}
+        extracted_themes = []
+        module_backlog = prior_script.get("module_backlog") or []
+        
+        if module_backlog:
+            global_idx = 0
+            for mod in module_backlog:
+                mod_title = mod.get("module_title", "")
+                for topic in mod.get("topics") or []:
+                    topic_title = topic.get("topic_title", "")
+                    extracted_themes.append({
+                        "theme_id": global_idx,
+                        "theme_title": f"{mod_title} - {topic_title}".strip(" -"),
+                        "questions": [{"id": "opener", "question_text": topic.get("opener_question", "")}]
+                    })
+                    global_idx += 1
+        elif prior_script.get("topic_backlog"):
+            for idx, block in enumerate(prior_script.get("topic_backlog") or []):
+                topic_title = block.get("topic_title") or f"Block {idx+1}"
+                extracted_themes.append({
+                    "theme_id": idx,
+                    "theme_title": topic_title,
+                    "questions": [{"id": "opener", "question_text": block.get("opener_question", "")}]
+                })
+        elif isinstance(prior_script.get("interview_arc"), list):
+            extracted_themes = prior_script.get("interview_arc")
+
+        # Determine next theme title and opener question
+        next_theme_title = next_block_str
+        next_opener_q = ""
+        target_idx = next_block_num - 1
+        
+        if extracted_themes and 0 <= target_idx < len(extracted_themes):
+            next_theme_title = extracted_themes[target_idx].get("theme_title", next_block_str)
+            questions = extracted_themes[target_idx].get("questions", [])
+            if questions:
+                next_opener_q = questions[0].get("question_text", "")
+        else:
+            # Fallback: string matching
+            for t in extracted_themes:
+                title = t.get("theme_title", "").lower()
+                if next_block_str.lower() in title:
+                    next_theme_title = t.get("theme_title")
+                    questions = t.get("questions", [])
+                    if questions:
+                        next_opener_q = questions[0].get("question_text", "")
+                    break
+
+        initial_snapshot = {
+            "current_script_question": next_opener_q,
+            "active_block": next_theme_title,
+            "tangent_count": 0,
+            "paused_at": datetime.now(timezone.utc).isoformat()
+        }
+
         next_sess_res = supabase.table("interview_sessions").insert({
             "expert_id": current_expert_id,
             "iteration_number": next_iter,
             "status": "paused",
             "live_transcript_source_id": source_id,
             "script": prior_session.get("script"),
-            "current_block": prior_session.get("current_block") or "Block 1",
-            "snapshot": prior_session.get("snapshot") or {}
+            "current_block": next_theme_title,
+            "raw_transcript": prior_session.get("raw_transcript"),
+            "snapshot": initial_snapshot
         }).execute()
         next_session_id = next_sess_res.data[0]["id"] if next_sess_res.data else None
 
+        hw_loops = (hw_result.get("homework") or {}).get("ai_open_loops", [])
         return {
             "status": "success",
             "message": "Session synthesized and next chapter prepared.",
             "synthesis": synth_result["session_synthesis"],
             "homework": hw_result["homework"],
+            "has_pending_homework": len(hw_loops) > 0,
             "next_session_id": next_session_id
         }
     except Exception as e:
@@ -748,8 +811,20 @@ async def resume_session_endpoint(session_id: str, current_expert_id: str = Depe
     raw_transcript = session.get("raw_transcript", "")
     last_question = snapshot.get("current_script_question", "We were discussing your expertise.")
     
-    # Extract the true last question the AI asked from the transcript
+    # Determine if the last turn was the expert (i.e., the last question was already answered)
+    last_turn_was_expert = False
     if raw_transcript:
+        # Clean trailing whitespace
+        normalized_transcript = raw_transcript.strip()
+        # Find the last occurrence of AI and EXPERT tags
+        last_ai_idx = normalized_transcript.rfind("[AI JOURNALIST]:")
+        last_expert_idx = normalized_transcript.rfind("[EXPERT]:")
+        if last_expert_idx > last_ai_idx:
+            last_turn_was_expert = True
+
+    # If the last turn was the AI (meaning they paused mid-question, before answering),
+    # extract and re-ask the exact last question the AI asked from the transcript.
+    if raw_transcript and not last_turn_was_expert:
         parts = raw_transcript.split("[AI JOURNALIST]:")
         if len(parts) > 1:
             last_ai_part = parts[-1].split("[EXPERT]:")[0].strip()
@@ -855,11 +930,12 @@ async def get_verification_status(session_id: str, current_expert_id: str = Depe
 async def start_session_endpoint(current_expert_id: str = Depends(get_current_expert_id)):
     """Phase 6: Create new session iteration and generate trust-signal opener."""
     try:
-        # Find latest iteration number
-        sessions_res = supabase.table("interview_sessions").select("iteration_number").eq("expert_id", current_expert_id).order("iteration_number", desc=True).limit(1).execute()
-        next_iter = 2
-        if sessions_res.data:
-            next_iter = sessions_res.data[0]["iteration_number"] + 1
+        # Find latest session
+        sessions_res = supabase.table("interview_sessions").select("*").eq("expert_id", current_expert_id).order("iteration_number", desc=True).limit(1).execute()
+        prior_session = sessions_res.data[0] if sessions_res.data else {}
+        next_iter = (prior_session.get("iteration_number") or 1) + 1 if prior_session else 2
+        prior_script = prior_session.get("script")
+        prior_transcript = prior_session.get("raw_transcript") or ""
 
         expert_res = supabase.table("experts").select("*").eq("id", current_expert_id).execute()
         expert_name = expert_res.data[0]["name"] if expert_res.data else "Expert"
@@ -878,12 +954,23 @@ async def start_session_endpoint(current_expert_id: str = Depends(get_current_ex
             "expert_id": current_expert_id,
             "iteration_number": next_iter,
             "status": "active",
-            "live_transcript_source_id": source_id
+            "live_transcript_source_id": source_id,
+            "script": prior_script,
+            "current_block": "Block 2"
         }).execute()
         session_id = session_res.data[0]["id"]
         
         # Fire Flywheel Bridge
         opener_data = await interview_domain.flywheel_bridge(current_expert_id)
+        bridge_opener = opener_data.get("bridge_opener", "") if isinstance(opener_data, dict) else ""
+        if bridge_opener:
+            new_transcript = prior_transcript.rstrip() + f"\n[AI]: {bridge_opener}" if prior_transcript else f"[AI]: {bridge_opener}"
+            try:
+                supabase.table("interview_sessions").update({
+                    "raw_transcript": new_transcript
+                }).eq("id", session_id).execute()
+            except Exception as e:
+                logger.warning(f"Could not update raw_transcript on new session: {e}")
         
         return {
             "status": "success",
