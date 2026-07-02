@@ -110,6 +110,8 @@ const parseScriptToThemes = (script: any): any[] => {
   return extractedThemes;
 };
 
+let hasLoadedRestoredState = false;
+
 const InterviewPage: React.FC = () => {
   const navigate = useNavigate();
   const { session } = useAuth();
@@ -156,24 +158,32 @@ const InterviewPage: React.FC = () => {
     const reentryStatement = localStorage.getItem('reentry_statement');
 
     if (restoredTranscript && reentryStatement) {
-      setMessages(parseTranscriptToMessages(restoredTranscript, reentryStatement));
-      localStorage.removeItem('restored_transcript');
-      localStorage.removeItem('reentry_statement');
+      if (!hasLoadedRestoredState) {
+        setMessages(parseTranscriptToMessages(restoredTranscript, reentryStatement));
+        hasLoadedRestoredState = true;
+        setTimeout(() => {
+          localStorage.removeItem('restored_transcript');
+          localStorage.removeItem('reentry_statement');
+          localStorage.removeItem('restored_snapshot');
+        }, 1000);
+      }
     } else {
-      // Seed the conversation with a generic opening temporarily, it will be overwritten if DB has history
-      setMessages([
-        {
-          id: '1',
-          role: 'ai',
-          text: icebreakerData.opening_icebreaker || "Welcome to the studio. We're excited to dive into your background and extract the unwritten rules of your domain.",
-          timestamp: Date.now() - 600000,
-          decision: {
-            intent_classification: 'opening_question',
-            internal_reasoning: 'Day 1 opening icebreaker from the generated script.',
-            action: 'script_question'
+      if (!hasLoadedRestoredState) {
+        // Seed the conversation with a generic opening temporarily, it will be overwritten if DB has history
+        setMessages([
+          {
+            id: '1',
+            role: 'ai',
+            text: icebreakerData.opening_icebreaker || "Welcome to the studio. We're excited to dive into your background and extract the unwritten rules of your domain.",
+            timestamp: Date.now() - 600000,
+            decision: {
+              intent_classification: 'opening_question',
+              internal_reasoning: 'Day 1 opening icebreaker from the generated script.',
+              action: 'script_question'
+            }
           }
-        }
-      ]);
+        ]);
+      }
     }
 
     hasSeededRef.current = true;
@@ -203,7 +213,8 @@ const InterviewPage: React.FC = () => {
           const dbSnapshot = data.session.snapshot;
 
           // If we didn't just resume (restoredTranscript is null) but the DB actually has a chat history, load it!
-          if (!restoredTranscript && dbTranscript && dbTranscript.includes('[EXPERT]:')) {
+          const isResuming = restoredTranscript || hasLoadedRestoredState;
+          if (!isResuming && dbTranscript && dbTranscript.includes('[EXPERT]:')) {
             setMessages(parseTranscriptToMessages(dbTranscript));
           }
 
@@ -214,7 +225,6 @@ const InterviewPage: React.FC = () => {
             try {
               finalSnapshot = JSON.parse(restoredSnapshotStr);
             } catch (e) { console.error("Error parsing snapshot", e); }
-            localStorage.removeItem('restored_snapshot');
           }
 
           if (finalSnapshot && finalSnapshot.active_block) {
@@ -247,7 +257,9 @@ const InterviewPage: React.FC = () => {
       })
       .catch(err => console.error("Failed to fetch session script", err));
 
-    hasSeededRef.current = true;
+    return () => {
+      hasLoadedRestoredState = false;
+    };
   }, [sessionId, navigate]);
 
   useEffect(() => {
@@ -432,7 +444,6 @@ const InterviewPage: React.FC = () => {
       setHasPendingHomework(Boolean(resData.has_pending_homework));
       setIsSynthesizing(false);
       setIsChapterComplete(true);
-      navigate(`/verify-insights/${sessionId}`);
     } catch (err) {
       console.error(err);
       alert("Failed to synthesize session.");
@@ -519,11 +530,6 @@ const InterviewPage: React.FC = () => {
         }
       }]);
     }
-  };
-
-  // ─── handleNextBlock (manual override button) ─────────────────────────────
-  const handleNextBlock = () => {
-    handleEndInterview(false);
   };
 
   // ─── Chapter Complete screen (Part 2 transition) ──────────────────────────

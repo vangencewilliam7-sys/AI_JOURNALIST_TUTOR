@@ -3598,7 +3598,11 @@ TRANSITION & DIVERSITY CONTROLS:
         except Exception as e:
             logger.error(f"Failed to insert into tacit_knowledge_reports: {e}")
 
-        return {"status": "success", "knowledge_output": knowledge_output}
+        return {
+            "status": "success",
+            "knowledge_output": knowledge_output,
+            "session_synthesis": session_synthesis
+        }
 
     async def generate_homework(self, session_id: str) -> Dict[str, Any]:
         session_res = self.supabase.table("interview_sessions").select("*").eq("id", session_id).execute()
@@ -3661,28 +3665,28 @@ TRANSITION & DIVERSITY CONTROLS:
         
         # Fetch latest homework
         hw_res = self.supabase.table("homework_ledger").select("*").eq("expert_id", expert_id).order("created_at", desc=True).limit(1).execute()
-         hw= hw_res.data[0] if hw_res.data else{}
+        hw = hw_res.data[0] if hw_res.data else {}
             
       
         previous_day = hw.get("iteration_number", 1)
         current_day = previous_day + 1
 
         block_2_first_q = "Let's dive into our second block: how do your core architectural decisions hold up under extreme production load?"
-try:
-sess_res = self.supabase.table("interview_sessions").select("script").eq("expert_id", expert_id).order("iteration_number", desc=True).limit(2).execute()
-if sess_res.data:
-for s in sess_res.data:
-if s.get("script"):
-arc = s["script"].get("interview_arc") or s["script"]
-if isinstance(arc, dict):
-sorted_blocks = sorted(arc.items(), key=lambda x: int(re.search(r'\d+', x[0]).group(0)) if re.search(r'\d+', x[0]) else 99)
-if len(sorted_blocks) > 1:
-b2_data = sorted_blocks[1][1]
-if isinstance(b2_data, dict) and b2_data.get("questions") and len(b2_data["questions"]) > 0:
-block_2_first_q = b2_data["questions"][0].get("question_text", block_2_first_q)
-break
-except Exception as e:
-logger.warning(f"Could not extract block 2 first question: {e}")
+        try:
+            sess_res = self.supabase.table("interview_sessions").select("script").eq("expert_id", expert_id).order("iteration_number", desc=True).limit(2).execute()
+            if sess_res.data:
+                for s in sess_res.data:
+                    if s.get("script"):
+                        arc = s["script"].get("interview_arc") or s["script"]
+                        if isinstance(arc, dict):
+                            sorted_blocks = sorted(arc.items(), key=lambda x: int(re.search(r'\d+', x[0]).group(0)) if re.search(r'\d+', x[0]) else 99)
+                            if len(sorted_blocks) > 1:
+                                b2_data = sorted_blocks[1][1]
+                                if isinstance(b2_data, dict) and b2_data.get("questions") and len(b2_data["questions"]) > 0:
+                                    block_2_first_q = b2_data["questions"][0].get("question_text", block_2_first_q)
+                                    break
+        except Exception as e:
+            logger.warning(f"Could not extract block 2 first question: {e}")
         
         res = self.llm.invoke(FLYWHEEL_BRIDGE_PROMPT.format(
             expert_name=expert.get('name', ''),

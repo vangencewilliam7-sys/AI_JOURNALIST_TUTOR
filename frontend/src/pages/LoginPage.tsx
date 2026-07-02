@@ -77,7 +77,7 @@ export const LoginPage = () => {
 
         if (data?.user) {
           try {
-            await supabase.table('experts').upsert({
+            await supabase.from('experts').upsert({
               id: data.user.id,
               name: name || email.split('@')[0],
               domain: 'General',
