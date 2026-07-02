@@ -15,7 +15,10 @@ import {
   XCircle,
   Lightbulb,
   BarChart3,
-  ArrowLeft
+  ArrowLeft,
+  Calendar,
+  Cpu,
+  Wrench
 } from 'lucide-react';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -38,6 +41,7 @@ interface Topic {
 
 interface Module {
   name: string;
+  module_context?: string;
   topics: Topic[];
 }
 
@@ -76,14 +80,20 @@ function toArray(val: any): string[] {
 function parseCourseStructure(raw: any): Module[] {
   if (!raw) return [];
 
+  // If raw is an object with a modules array, extract and parse that
+  if (raw && typeof raw === 'object' && !Array.isArray(raw) && Array.isArray(raw.modules)) {
+    return parseCourseStructure(raw.modules);
+  }
+
   // Already an array of modules
   if (Array.isArray(raw)) {
     return raw.map((m: any) => ({
-      name: m.name || m.module || 'Unnamed Module',
+      name: m.name || m.module || m.module_title || 'Unnamed Module',
+      module_context: m.module_context || m.module_description || '',
       topics: (m.topics || []).map((t: any) => {
         if (typeof t === 'string') return { name: t };
         return {
-          name: t.name || t.topic || 'Unnamed Topic',
+          name: t.name || t.topic || t.topic_title || 'Unnamed Topic',
           node: t.node || t,
           status: t.status,
         };
@@ -98,7 +108,7 @@ function parseCourseStructure(raw: any): Module[] {
       topics: Array.isArray(topics)
         ? topics.map((t: any) => {
             if (typeof t === 'string') return { name: t };
-            return { name: t.name || t.topic || 'Unnamed Topic', node: t.node || t, status: t.status };
+            return { name: t.name || t.topic || t.topic_title || 'Unnamed Topic', node: t.node || t, status: t.status };
           })
         : [],
     }));
@@ -280,7 +290,16 @@ const ModuleAccordion: React.FC<{ module: Module; index: number }> = ({ module, 
 
       {open && (
         <div style={{ padding: '0 20px 20px 20px', borderTop: '1px solid var(--border)' }}>
-          <div style={{ paddingTop: '16px' }}>
+          {module.module_context && (
+            <p style={{
+              fontSize: '13.5px', lineHeight: '1.6', color: 'var(--text-dim)',
+              background: 'rgba(255,255,255,0.01)', border: '1px solid rgba(255,255,255,0.03)',
+              borderRadius: '8px', padding: '12px 16px', margin: '16px 0 12px 0'
+            }}>
+              {module.module_context}
+            </p>
+          )}
+          <div style={{ paddingTop: module.module_context ? '4px' : '16px' }}>
             {module.topics.length > 0
               ? module.topics.map((t, i) => <TopicCard key={i} topic={t} index={i} />)
               : <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: 0 }}>No topics extracted yet.</p>
@@ -417,11 +436,17 @@ const KnowledgeOutputPage: React.FC = () => {
               borderRadius: '16px', padding: '28px 32px', marginBottom: '28px',
             }}>
               <h1 style={{ fontSize: '22px', fontWeight: 800, margin: '0 0 6px 0', lineHeight: 1.3 }}>
-                {selected.report_title || selected.expert_domain || 'Knowledge Report'}
+                {selected.course_structure?.course_title || selected.report_title || selected.expert_domain || 'Knowledge Report'}
               </h1>
-              <p style={{ color: 'var(--text-dim)', fontSize: '13px', margin: '0 0 20px 0' }}>
+              <p style={{ color: 'var(--text-dim)', fontSize: '13px', margin: '0 0 16px 0' }}>
                 {selected.expert_domain} · {new Date(selected.created_at).toLocaleDateString()}
               </p>
+
+              {selected.course_structure?.course_context && (
+                <div style={{ marginBottom: '20px', fontSize: '14px', lineHeight: '1.6', color: 'var(--text-dim)' }}>
+                  {selected.course_structure.course_context}
+                </div>
+              )}
 
               <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
                 <div style={{
@@ -463,7 +488,57 @@ const KnowledgeOutputPage: React.FC = () => {
                     <div style={{ fontSize: '9px', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Modules</div>
                   </div>
                 </div>
+                {selected.course_structure?.duration_weeks && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: '10px',
+                    padding: '10px 16px', borderRadius: '10px',
+                    background: 'rgba(139,92,246,0.06)', border: '1px solid rgba(139,92,246,0.12)',
+                  }}>
+                    <Calendar size={16} style={{ color: '#8b5cf6' }} />
+                    <div>
+                      <div style={{ fontSize: '18px', fontWeight: 800, color: '#8b5cf6', lineHeight: 1 }}>
+                        {selected.course_structure.duration_weeks} <span style={{ fontSize: '11px' }}>wks</span>
+                      </div>
+                      <div style={{ fontSize: '9px', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Duration</div>
+                    </div>
+                  </div>
+                )}
               </div>
+
+              {/* Tech Stack & Tools */}
+              {(selected.course_structure?.tech_stack || selected.course_structure?.tools) && (
+                <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '13px', borderTop: '1px solid var(--border)', paddingTop: '16px' }}>
+                  {selected.course_structure?.tech_stack && selected.course_structure.tech_stack.length > 0 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ color: 'var(--text-muted)', fontWeight: 600, minWidth: '95px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <Cpu size={13} /> Tech Stack:
+                      </span>
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        {selected.course_structure.tech_stack.map((tech: string, idx: number) => (
+                          <span key={idx} style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '6px', padding: '2px 8px', fontSize: '12px', color: 'var(--text)' }}>
+                            {tech}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {selected.course_structure?.tools && selected.course_structure.tools.length > 0 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ color: 'var(--text-muted)', fontWeight: 600, minWidth: '95px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <Wrench size={13} /> Tools:
+                      </span>
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        {selected.course_structure.tools.map((tool: string, idx: number) => (
+                          <span key={idx} style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '6px', padding: '2px 8px', fontSize: '12px', color: 'var(--text-dim)' }}>
+                            {tool}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
 
               {selected.summary && (
                 <p style={{

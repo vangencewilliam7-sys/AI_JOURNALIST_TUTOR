@@ -132,6 +132,15 @@ A real course module covers multiple facets of its theme. For example:
 If the transcript doesn't provide enough raw material to fill all topics for a module, use "inferred": true for those topics (but STILL include them — do NOT delete the topic).
 MINIMUM 3 topics per module, TARGET 4-5 topics per module.
 
+COURSE METADATA EXTRACTION:
+For the course_structure, you must extract:
+- course_context: Summarize the background, focus, and target scope of the course.
+- duration_weeks: The estimated duration in weeks (as an integer), or null if not mentioned.
+- tools: An array of specific tools, applications, or developer environments mentioned (e.g., Docker, PostgreSQL, Git).
+- tech_stack: An array of core technologies, languages, frameworks, or libraries mentioned (e.g., Python, FastAPI, Django).
+For each module in the modules array, you must extract:
+- module_context: A description of the focus, purpose, and context of this module as discussed.
+
 7-SLOT EXTRACTION RULE (CRITICAL):
 For EACH topic, you must extract ALL 7 knowledge slots from the transcript:
 - concept: What is this topic in plain terms? What does the expert say it fundamentally is?
@@ -161,9 +170,14 @@ Return a STRICT JSON object matching this schema. NOTE: The "topics" array insid
   }},
   "course_structure": {{
     "course_title": "Title derived from the interview content",
+    "course_context": "Detailed description of the course context and target focus.",
+    "duration_weeks": 12,
+    "tools": ["Any specific software, services, or tools the learner will use, e.g. Docker, Git, Postman"],
+    "tech_stack": ["Core technologies, languages, databases, or frameworks, e.g. Python, PostgreSQL, FastAPI"],
     "modules": [
       {{
         "module_title": "Major chapter or phase",
+        "module_context": "The context, focus area, and background of this module",
         "learning_outcomes": ["What the learner will be able to do after this module"],
         "topics": [
           {{
