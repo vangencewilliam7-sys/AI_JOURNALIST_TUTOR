@@ -3829,3 +3829,70 @@ InterviewDomain.submit_evidence = _submit_evidence_method
 InterviewDomain.background_verify_evidence = _background_verify_evidence_method
 InterviewDomain.generate_verification_questions = _generate_verification_questions_method
 
+async def _background_extract_and_save_knowledge_method(self, session_id: str, expert_id: str, question: str, answer: str, block_goal: str, current_topic: str):
+    from prompts.conversation_intelligence.knowledge_extractor import build_prompt
+    logger.info(f"Background Knowledge Extraction running for session: {session_id}")
+    try:
+        prompt_text = build_prompt({
+            "question": question,
+            "answer": answer
+        })
+        res = self.llm.invoke(prompt_text)
+        cl = res.content.strip()
+        if cl.startswith("```"):
+            lines = cl.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cl = "\n".join(lines).strip()
+            
+        try:
+            raw_items = json.loads(cl)
+        except Exception as json_e:
+            logger.error(f"Failed to parse LLM JSON: {cl}")
+            raise json_e
+            
+        # Handle case where LLM wraps array in a dict (e.g. {"items": [...]})
+        if isinstance(raw_items, dict):
+            for v in raw_items.values():
+                if isinstance(v, list):
+                    raw_items = v
+                    break
+            else:
+                raw_items = [raw_items]
+        elif not isinstance(raw_items, list):
+            raw_items = [raw_items]
+        
+        valid_items = []
+        for item in raw_items:
+            if not item.get("raw_quote"):
+                continue  # Drop hallucinations or unsourced claims
+            
+            valid_items.append({
+                "session_id": session_id,
+                "expert_id": expert_id,
+                "knowledge_type": item.get("knowledge_type", "background_context"),
+                "topic": item.get("topic", current_topic),
+                "title": item.get("title", ""),
+                "raw_quote": item["raw_quote"],
+                "clean_insight": item.get("clean_insight", ""),
+                "signal": item.get("signal"),
+                "interpretation": item.get("interpretation"),
+                "expert_action": item.get("expert_action"),
+                "decision_rule": item.get("decision_rule"),
+                "workflow_step": item.get("workflow_step", {}),
+                "source_or_origin": item.get("source_or_origin"),
+                "confidence": item.get("confidence", "medium"),
+                "validation_status": "unvalidated",
+                "missing_fields": item.get("missing_fields", [])
+            })
+
+        if valid_items:
+            self.supabase.table("knowledge_items").insert(valid_items).execute()
+            logger.info(f"Saved {len(valid_items)} knowledge items for {session_id}")
+            
+    except Exception as e:
+        logger.error(f"Background knowledge extraction failed for {session_id}: {e}")
+
+InterviewDomain.background_extract_and_save_knowledge = _background_extract_and_save_knowledge_method

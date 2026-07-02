@@ -545,6 +545,17 @@ async def live_turn_endpoint(request: LiveTurnRequest, background_tasks: Backgro
             embeddings_model
         )
         
+        # Real-Time Atomic Tacit Knowledge Extraction
+        background_tasks.add_task(
+            interview_domain.background_extract_and_save_knowledge,
+            request.session_id,
+            current_expert_id,
+            request.current_script_question,
+            request.expert_answer,
+            request.active_block,
+            "General Topic"
+        )
+        
         # Fetch updated topic progress checklist
         tp_res = supabase.table("topic_progress").select("*").eq("session_id", request.session_id).execute()
         result["topic_progress"] = tp_res.data or []
@@ -853,12 +864,25 @@ async def resume_session_endpoint(session_id: str, current_expert_id: str = Depe
         import logging
         logging.error(f"Failed to generate re-entry statement: {e}")
         reentry_statement = f"Welcome back! Before we paused, you were discussing '{last_question}'. Let's pick up where we left off."
+
+    # Append the welcome back statement to the database raw_transcript so it persists across focus / tab refreshes
+    new_transcript = raw_transcript
+    if new_transcript:
+        new_transcript = new_transcript.strip() + f"\n\n[AI JOURNALIST]: {reentry_statement}"
+    else:
+        new_transcript = f"[AI JOURNALIST]: {reentry_statement}"
+
+    # Update status to active and save the updated transcript
+    supabase.table("interview_sessions").update({
+        "status": "active",
+        "raw_transcript": new_transcript
+    }).eq("id", session_id).execute()
     
     return {
         "status": "resumed",
         "reentry_statement": reentry_statement,
         "snapshot": snapshot,
-        "raw_transcript": session.get("raw_transcript", ""),
+        "raw_transcript": new_transcript,
         "script": session.get("script", {})
     }
 
